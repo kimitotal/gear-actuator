@@ -146,11 +146,11 @@ class Sim {
     this.run(300);
     this.runUntil(() => !this.drive(), 6000);
     this.run(300);                                   // LCD is not refreshed while moving
-    this.runUntil(() => /^(Gear: |SENSOR FAULT|BAD CALIBRATION)/.test(this.lcd.line(0)), 2500);
+    this.runUntil(() => /^Gear: /.test(this.lcd.line(0)), 2500);
     this.run(60);                                    // let the LCD finish writing the line
     return this.lcd.line(0);
   }
-  saw(msg) { return this.lcdLog.some(l => l.startsWith(msg)); }
+  saw(msg) { return this.lcdLog.some(l => l.split('|').some(x => x.startsWith(msg))); }
 }
 
 const near = (v, target, tol = 0.035) => Math.abs(v - target) <= tol;
@@ -259,7 +259,7 @@ test('sensor wire off for 300 ms mid-shift: fault, motor off, then recovers', ()
   assert.equal(s.v, vAtFault);
   assert.equal(s.drivenMs, drivenAtFault);
   s.run(300);
-  assert.equal(s.lcd.line(0), 'SENSOR FAULT');
+  assert.equal(s.lcd.line(1), 'SENSOR FAULT');
   s.sensor = v => v;
   s.run(1300);
   assert.ok(s.saw('SENSOR OK'));
@@ -333,7 +333,7 @@ test('limp mode: dead sensor, hold P + brake creeps toward P, max 3 s', () => {
   const s = new Sim(D);
   s.sensor = () => 0;
   s.run(600);
-  assert.equal(s.lcd.line(0), 'SENSOR FAULT');
+  assert.equal(s.lcd.line(1), 'SENSOR FAULT');
 
   s.press('P', 500);                         // no brake
   s.run(200);
@@ -378,11 +378,15 @@ test('reset cause: reset button via Optiboot (EXTRF+WDRF) is not a watchdog', ()
 
 test('LCD: boot screen, voltage line, brake indicator and shift arrow', () => {
   const s = new Sim(D);
-  assert.ok(s.lcdLog.includes('Start: POWER ON|WD:0 BO:0'), s.lcdLog.join('\n'));
+  assert.ok(s.lcdLog.includes('Gear: D|Start: POWER ON'), s.lcdLog.join('\n'));
   s.settle();
   assert.equal(s.lcd.line(1), '2.80V');
   s.brake(true); s.run(400);
   assert.equal(s.lcd.line(1), '2.80V BRAKE');
+  s.brake(false); s.press('P'); s.run(400);          // blocked: message on line 1, gear stays
+  assert.ok(s.lcdLog.includes('Gear: D|PRESS BRAKE'), s.lcdLog.slice(-4).join('
+'));
+  s.run(1500);
   s.brake(false);
   s.hold('N'); s.runUntil(() => s.v < 2.6, 2000); s.release('N');
   assert.equal(s.lcd.line(0), 'D -> N');

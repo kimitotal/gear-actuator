@@ -480,17 +480,20 @@ void lcdLine(uint8_t row, const char* s){
 void updateLcd(float v, unsigned long now){
   if (!lcdOk) return;
   char l0[17], l1[17], vs[8];
+  // Line 0 is ALWAYS the gear. Messages and faults go on line 1.
   if (state == ST_MOVING)                      // drawn once, by requestShift()
     snprintf(l0, sizeof l0, "%c -> %c", gearCh(currentGear), gearCh(mv.target));
-  else if (msgText[0] && now - msgAt < MSG_MS)
-    snprintf(l0, sizeof l0, "%s", msgText);
-  else if (state == ST_FAULT)
-    snprintf(l0, sizeof l0, "%s", faultText);
   else
     snprintf(l0, sizeof l0, "Gear: %c", gearCh(currentGear));
 
-  dtostrf(v, 4, 2, vs);
-  snprintf(l1, sizeof l1, "%sV %s", vs, inBrake.stable ? "BRAKE" : "");
+  if (msgText[0] && now - msgAt < MSG_MS)
+    snprintf(l1, sizeof l1, "%s", msgText);
+  else if (state == ST_FAULT)
+    snprintf(l1, sizeof l1, "%s", faultText);
+  else {
+    dtostrf(v, 4, 2, vs);
+    snprintf(l1, sizeof l1, "%sV %s", vs, inBrake.stable ? "BRAKE" : "");
+  }
   g_lcdBusy = LCD_BUSY_MAGIC;
   lcdLine(0, l0);
   lcdLine(1, l1);
@@ -548,9 +551,8 @@ void setup(){
     lcd.init();
     lcd.backlight();
     char l0[17], l1[17];
-    snprintf(l0, sizeof l0, "Start: %s", resetName(rf));
-    // the two counts that mean trouble; all four are on Serial and in diag.ino
-    snprintf(l1, sizeof l1, "WD:%u BO:%u", EEPROM.read(EE_CNT_WDT), EEPROM.read(EE_CNT_BOR));
+    snprintf(l0, sizeof l0, "Gear: %c", gearCh(currentGear));
+    snprintf(l1, sizeof l1, "Start: %s", resetName(rf));   // counts: Serial / diag.ino
     lcdLine(0, l0);
     lcdLine(1, l1);
     g_lcdBusy = 0;
