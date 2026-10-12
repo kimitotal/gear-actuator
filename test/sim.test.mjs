@@ -6,8 +6,9 @@
 //
 // Needs arduino-cli (on PATH or in ARDUINO_CLI) to build the hex.
 //
-// The actuator model is crude on purpose (constant speed per PWM, stops dead,
-// no inertia). It checks the state machine, NOT motor tuning, noise or heat.
+// The actuator model is simple: speed per PWM with inertia (spin-up, brake and
+// coast time constants, which are guesses until measured). It checks the state
+// machine and how much overshoot it tolerates, NOT real motor tuning, noise or heat.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -71,12 +72,17 @@ class Lcd {
 
 class Sim {
   // startV: where the actuator sits at power-up. mcusr: reset flags the chip reports.
-  constructor(startV, { mcusr = PORF, lcdPresent = true, eeprom = new EEPROMMemoryBackend(1024), hex = program } = {}) {
+  constructor(startV, { mcusr = PORF, lcdPresent = true, eeprom = new EEPROMMemoryBackend(1024), hex = program, motor = {} } = {}) {
     this.v = startV;
     this.sensor = v => v;        // override to fake a broken / glitching sensor wire
     this.blocked = false;        // actuator mechanically jammed
     this.reversed = false;       // motor wired backwards
     this.drivenMs = 0;           // how long the motor has been powered
+    this.reversals = 0;          // times the motor changed direction (hunting shows up here)
+    this.lastDir = 0;
+    this.vel = 0;                // actuator speed, V/s
+    // Motor time constants in ms. Guesses for a geared actuator until measured on the real one.
+    this.motor = { spinUp: 40, brake: 15, coast: 80, ...motor };
     this.serial = '';
     this.lcd = new Lcd();
     this.lcdLog = [];
@@ -117,13 +123,28 @@ class Sim {
     return in1 && !in2 ? ena : in2 && !in1 ? -ena : 0;
   }
 
+  braked() {                                                      // ENA high, IN1 == IN2
+    const d = this.cpu.data;
+    const ena = (d[0xb0] & 0x20) ? d[0xb4] > 0 : !!(d[0x2a] & d[0x2b] & 8);
+    return ena && !this.drive();
+  }
+
   stepMs() {
     let drive = this.drive();
     if (drive) this.drivenMs++;
+    if (drive && this.lastDir && Math.sign(drive) !== this.lastDir) this.reversals++;
+    if (drive) this.lastDir = Math.sign(drive);
     if (this.reversed) drive = -drive;
     const duty = Math.abs(drive);
-    const speed = duty <= 0.35 ? 0 : (duty - 0.35) / 0.65 * 2.2;  // V/s; PWM 220 ~1.7, PWM 140 ~0.7
-    if (!this.blocked) this.v = Math.min(3.2, Math.max(0.3, this.v + Math.sign(drive) * speed / 1000));
+    // Free-running speed in V/s (PWM 220 ~1.7, PWM 140 ~0.7); below 35 % duty it does not turn.
+    const target = duty <= 0.35 ? 0 : Math.sign(drive) * (duty - 0.35) / 0.65 * 2.2;
+    // Inertia: speed follows with a time constant. Powered = spinUp, shorted by
+    // the L298N brake = brake, pins floating / ENA low = coast (friction only).
+    const tau = drive ? this.motor.spinUp : this.braked() ? this.motor.brake : this.motor.coast;
+    this.vel += (target - this.vel) * Math.min(1, 1 / tau);
+    if (this.blocked || (!target && Math.abs(this.vel) < 0.005)) this.vel = 0;   // friction holds it
+    this.v = Math.min(3.2, Math.max(0.3, this.v + this.vel / 1000));
+    if (this.v === 3.2 || this.v === 0.3) this.vel = 0;           // mechanical end stop
     this.adc.channelValues[0] = Math.min(5, Math.max(0, this.sensor(this.v)));
     const l = this.lcd.line(0) + '|' + this.lcd.line(1);
     if (l !== this.lcdLog.at(-1)) this.lcdLog.push(l);
@@ -270,7 +291,7 @@ test('sensor wire off for 300 ms mid-shift: fault, motor off, then recovers', ()
   s.sensor = () => 0; s.run(150);
   const vAtFault = s.v, drivenAtFault = s.drivenMs;
   s.run(150);
-  assert.equal(s.v, vAtFault);
+  assert.ok(near(s.v, vAtFault, 0.002), 'actuator kept moving after the fault');
   assert.equal(s.drivenMs, drivenAtFault);
   s.run(300);
   assert.equal(s.lcd.line(1), 'SENSOR FAULT');
@@ -526,4 +547,45 @@ test('diag.ino prints the event log that final_safe.ino wrote', () => {
   assert.match(diag.send('x'), /logs cleared/);
   assert.doesNotMatch(diag.send('l'), /MOTOR BLOCKED/);
   assert.match(diag.send('c'), /OK, final_safe/);                  // clearing keeps the calibration
+});
+
+// Inertia: the actuator coasts on after the motor is braked, so it can overshoot
+// the target. These check how much of that the controller copes with.
+function shiftAll(motor, tol = 0.035) {
+  const s = new Sim(P, { motor });
+  s.brake(true);
+  let worst = 0;
+  for (const [name, target] of [['D', D], ['R', R], ['N', N], ['P', P], ['N', N], ['D', D]]) {
+    const before = s.reversals;
+    s.press(name);
+    const line = s.settle();
+    if (line !== 'Gear: ' + name || !near(s.v, target, tol)) return { ok: false, why: `${name}: ${line} at ${s.v.toFixed(3)} V` };
+    worst = Math.max(worst, s.reversals - before);
+  }
+  return { ok: true, worst };
+}
+
+test('inertia: every shift lands without hunting, with the default motor', () => {
+  const r = shiftAll({});
+  assert.ok(r.ok, r.why);
+  assert.ok(r.worst <= 1, `motor reversed ${r.worst} times in one shift`);
+});
+
+test('inertia: a slow-stopping actuator (brake time constant up to 60 ms) still lands', () => {
+  for (const brake of [30, 60]) {
+    const r = shiftAll({ brake });
+    assert.ok(r.ok, `brake ${brake} ms: ${r.why}`);
+  }
+});
+
+// The sketch calls a shift done after 120 ms inside +-0.03 V, moving or not. An
+// actuator that coasts for a long time is therefore still rolling at that
+// moment and comes to rest a little off-centre: right gear, inside the 0.10 V
+// hold tolerance, but not within 0.03 V.
+test('inertia: a very slow-stopping actuator (100-500 ms) ends in the right gear, slightly off-centre', () => {
+  for (const brake of [100, 200, 500]) {
+    const r = shiftAll({ brake }, 0.10);
+    assert.ok(r.ok, `brake ${brake} ms: ${r.why}`);
+    assert.ok(r.worst <= 3, `brake ${brake} ms: motor reversed ${r.worst} times in one shift`);
+  }
 });

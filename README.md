@@ -73,9 +73,9 @@ Not yet tested on hardware.
 ## Logic test (no hardware)
 
 `test/sim.test.mjs` runs the compiled `final_safe.ino` in an ATmega328P simulator
-(avr8js) against a simple actuator model and checks 30 scenarios (two of them run `diag.ino` too): interlocks, button
+(avr8js) against a simple actuator model and checks 33 scenarios (two of them run `diag.ino` too): interlocks, button
 noise, sensor glitch / fault / recovery, stall, wrong direction, hold, limp mode, reset
-cause. Needs Node.js and `arduino-cli`.
+cause, overshoot from actuator inertia. Needs Node.js and `arduino-cli`.
 
 ```
 cd test
@@ -83,8 +83,15 @@ npm install
 npm test
 ```
 
-The actuator model is crude (constant speed, no inertia, no electrical noise), so this
-checks the state machine only – it does not replace the bench tests above.
+The actuator model has inertia (it spins up and coasts on after braking), but its time
+constants are guesses until measured on the real actuator, and it has no electrical noise.
+So this checks the state machine and how much overshoot it tolerates – it does not replace
+the bench tests above.
+
+What the inertia scenarios showed: a shift counts as done after 120 ms inside ±0.03 V,
+whether or not the actuator has stopped. An actuator that stops within about 60 ms lands
+within ±0.03 V. One that coasts longer (tested up to 500 ms) still ends in the right gear
+but rests up to about 0.04 V off-centre, inside the 0.10 V hold tolerance.
 
 Every pull request is checked automatically (`.github/workflows/ci.yml`): all sketches
 are compiled and this test is run.
