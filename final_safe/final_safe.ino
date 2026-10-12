@@ -166,9 +166,18 @@ DebouncedInput inBrake   = {PIN_BRAKE,   INPUT_STABLE_MS, false, false, 0};
 char msgText[17] = "";
 unsigned long msgAt = 0;
 const char* bootWarn = nullptr;   // WATCHDOG / BROWNOUT start: stays on the LCD until a button is pressed
+
+// Serial monitor (115200): one line per shift, message and fault, e.g.
+//   [12.3s] D -> N ok 0.42s 2.01V
+// Lines are short and rare, so they fit the 64-byte buffer without blocking.
+float lastV = 0;                  // latest sensor reading, set in loop()
+void serialStamp(){ Serial.print('['); Serial.print(millis() / 1000.0f, 1); Serial.print(F("s] ")); }
+void serialV(){ Serial.print(' '); Serial.print(lastV, 2); Serial.println('V'); }
+
 void showMsg(const char* t){
   strncpy(msgText, t, 16); msgText[16] = 0;
   msgAt = millis();
+  serialStamp(); Serial.print(t); serialV();
 }
 
 /**************** MOTOR ****************/
@@ -316,6 +325,7 @@ void enterFault(uint8_t code){
   // Mid-shift = gear unknown. A hold correction keeps its gear.
   if (state == ST_MOVING && !mv.correction) currentGear = G_NONE;
   strncpy(faultText, evName(code), 16); faultText[16] = 0;
+  serialStamp(); Serial.print(faultText); serialV();
   recovering = false;
   state = ST_FAULT;
 }
@@ -384,6 +394,11 @@ void startMove(Gear g, bool correction, float v){
 void endMove(bool success, uint8_t why, float v){
   motorBrake();
   if (success){
+    serialStamp();
+    if (mv.correction) Serial.print(F("hold "));
+    else { Serial.print(gearCh(currentGear)); Serial.print(F(" -> ")); }
+    Serial.print(gearCh(mv.target)); Serial.print(F(" ok "));
+    Serial.print((millis() - mv.startT) / 1000.0f, 2); Serial.print('s'); serialV();
     currentGear = mv.target;
     if (!mv.correction){ holdSuspended = false; correctionCount = 0; }
   } else {
@@ -562,6 +577,8 @@ void updateLcd(float v, unsigned long now){
 
 /**************** SETUP ****************/
 void setup(){
+  Serial.begin(115200);   // first: faults found during start-up are printed too
+
   // 1) Outputs to a safe state FIRST
   digitalWrite(PIN_ENA, LOW);
   pinMode(PIN_ENA, OUTPUT);
@@ -577,6 +594,7 @@ void setup(){
   // 3) Adopt the gear the actuator is ALREADY in – never move at boot
   calOk = checkCalibration();
   float v = readPosV();
+  lastV = v;
   if (calOk && posInRange(v)) currentGear = detectGear(v);
   uint8_t rf = resetFlags();
   eeInit();
@@ -588,7 +606,6 @@ void setup(){
   // 4) Reset diagnostics
   if (!(rf & (_BV(PORF) | _BV(EXTRF))) && (rf & (_BV(WDRF) | _BV(BORF)))) bootWarn = resetName(rf);
   logReset(rf);
-  Serial.begin(115200);
   Serial.print(F("Reset cause: ")); Serial.println(resetName(rf));
   Serial.print(F("Counts PWR/EXT/BOR/WDT: "));
   Serial.print(EEPROM.read(EE_CNT_PWR)); Serial.print('/');
@@ -629,6 +646,7 @@ void loop(){
   wdt_reset();
   unsigned long now = millis();
   float v = readPosV();
+  lastV = v;
 
   inBrake.update(now);
   Gear req = readButtons(now);
