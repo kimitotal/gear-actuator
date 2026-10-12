@@ -50,15 +50,21 @@ const uint8_t PIN_POS = A0;
 const uint8_t inPins[I_COUNT]  = {4, 5, 6, 7, 10};
 const char* const inNames[I_COUNT] = {"P", "R", "N", "D", "BRK"};
 
-/**************** CALIBRATION – copy the SAME values as final_safe.ino ****************/
-const float ADC_VREF     = 5.00f;
-const float POS_MIN_V_OK = 0.20f;
-const float POS_MAX_V_OK = 4.80f;
-const float TARGET_P_V   = 0.60f;
-const float TARGET_R_V   = 1.20f;
-const float TARGET_N_V   = 2.00f;
-const float TARGET_D_V   = 2.80f;
-const float DETECT_WIN_V = 0.15f;
+/**************** CALIBRATION – read from EEPROM ****************/
+// Type the gear voltages ONLY in final_safe.ino. It saves them to EEPROM every
+// time it starts and loadCalibration() reads them here. Until final_safe.ino
+// has run once, the gears are unknown (NAN) and only the sensor limits below apply.
+struct Cal { float adcVref, posMin, posMax, p, r, n, d, detectWin; };   // same as final_safe.ino
+Cal  cal = {5.00f, 0.20f, 4.80f, NAN, NAN, NAN, NAN, 0.15f};
+bool calLoaded = false;
+#define ADC_VREF     cal.adcVref
+#define POS_MIN_V_OK cal.posMin
+#define POS_MAX_V_OK cal.posMax
+#define TARGET_P_V   cal.p
+#define TARGET_R_V   cal.r
+#define TARGET_N_V   cal.n
+#define TARGET_D_V   cal.d
+#define DETECT_WIN_V cal.detectWin
 
 /**************** TEST SETTINGS ****************/
 const int           JOG_PWM       = 120;
@@ -159,8 +165,14 @@ float readVcc(){
 const int     EE_MAGIC = 0, EE_IDX = 1, EE_LOG = 2, EE_LOG_N = 8;
 const int     EE_CNT_PWR = 10, EE_CNT_EXT = 11, EE_CNT_BOR = 12, EE_CNT_WDT = 13;
 const int     EE_EV_IDX = 16, EE_EV_LOG = 17, EE_EV_N = 16;   // 2 bytes per event
-const int     EE_END = EE_EV_LOG + 2 * EE_EV_N;
-const uint8_t EE_MAGIC_VAL = 0x5B;
+const int     EE_END = EE_EV_LOG + 2 * EE_EV_N;                 // end of the logs
+const int     EE_CAL = EE_END;                                  // struct Cal
+const uint8_t EE_MAGIC_VAL = 0x5C;
+
+void loadCalibration(){
+  calLoaded = EEPROM.read(EE_MAGIC) == EE_MAGIC_VAL;
+  if (calLoaded) EEPROM.get(EE_CAL, cal);
+}
 
 // Event codes written by final_safe.ino – same order as its EV_ list.
 const char* const evNames[] = {"", "START", "SENSOR FAULT", "BAD CALIBRATION", "MOTOR BLOCKED",
@@ -308,7 +320,7 @@ void printResetLog(){
 }
 
 void clearResetLog(){
-  for (int a = 0; a < EE_END; a++) EEPROM.update(a, 0);
+  for (int a = 1; a < EE_END; a++) EEPROM.update(a, 0);   // keeps the magic byte and the calibration
   Serial.println(F("Reset and event logs cleared."));
 }
 
@@ -316,7 +328,11 @@ void checkCalibration(){
   const float t[4] = {TARGET_P_V, TARGET_R_V, TARGET_N_V, TARGET_D_V};
   const char  n[4] = {'P', 'R', 'N', 'D'};
   bool ok = true;
-  Serial.println(F("Calibration check:"));
+  if (!calLoaded){
+    Serial.println(F("No calibration stored: flash final_safe.ino, let it start once, then flash diag.ino again."));
+    return;
+  }
+  Serial.println(F("Calibration check (values from final_safe.ino, as it last started):"));
   for (uint8_t i = 0; i < 4; i++){
     Serial.print(F("  ")); Serial.print(n[i]); Serial.print(F(" = ")); Serial.print(t[i], 3);
     if (t[i] < POS_MIN_V_OK + DETECT_WIN_V || t[i] > POS_MAX_V_OK - DETECT_WIN_V){
@@ -419,6 +435,7 @@ void setup(){
   Serial.begin(115200);
   printHelp();
   printResetLog();
+  loadCalibration();
   checkCalibration();
 
   Wire.begin();

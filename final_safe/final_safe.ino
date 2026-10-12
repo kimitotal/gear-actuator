@@ -249,13 +249,21 @@ struct Move {
 const int     EE_MAGIC = 0, EE_IDX = 1, EE_LOG = 2, EE_LOG_N = 8;
 const int     EE_CNT_PWR = 10, EE_CNT_EXT = 11, EE_CNT_BOR = 12, EE_CNT_WDT = 13;
 const int     EE_EV_IDX = 16, EE_EV_LOG = 17, EE_EV_N = 16;   // 2 bytes per event
-const int     EE_END = EE_EV_LOG + 2 * EE_EV_N;
-const uint8_t EE_MAGIC_VAL = 0x5B;   // change to wipe the logs
+const int     EE_END = EE_EV_LOG + 2 * EE_EV_N;                 // end of the logs
+const int     EE_CAL = EE_END;                                  // struct Cal
+const uint8_t EE_MAGIC_VAL = 0x5C;   // change to wipe the logs
 
 void eeInit(){
-  if (EEPROM.read(EE_MAGIC) == EE_MAGIC_VAL) return;
-  for (int a = 0; a < EE_END; a++) EEPROM.update(a, 0);
-  EEPROM.update(EE_MAGIC, EE_MAGIC_VAL);
+  if (EEPROM.read(EE_MAGIC) != EE_MAGIC_VAL){
+    for (int a = 0; a < EE_END; a++) EEPROM.update(a, 0);
+    EEPROM.update(EE_MAGIC, EE_MAGIC_VAL);
+  }
+  // Publish the calibration for diag.ino, so the values are typed only here.
+  // This sketch always uses its own constants, never what is in the EEPROM.
+  struct Cal { float adcVref, posMin, posMax, p, r, n, d, detectWin; };
+  const Cal cal = {ADC_VREF, POS_MIN_V_OK, POS_MAX_V_OK,
+                   TARGET_P_V, TARGET_R_V, TARGET_N_V, TARGET_D_V, DETECT_WIN_V};
+  EEPROM.put(EE_CAL, cal);             // put() only writes bytes that changed
 }
 
 // The last EE_EV_N faults / odd events survive power-off, so what happened

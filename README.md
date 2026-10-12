@@ -51,10 +51,14 @@ Fails safe: a broken wire blocks P/R and leaving P.
 
 ## Bench tests (use diag.ino, serial 115200, send `h`)
 
+The gear voltages are typed in ONE place: `final_safe.ino`. It saves them to EEPROM each
+time it starts and `diag.ino` reads them from there, so flash `final_safe.ino` and let it
+start once (it does not move the actuator) before using `diag.ino`.
+
 1. `z`, then engine on, fans/lights/wipers on, don't touch buttons – spikes must stay 0, Vcc min ≳ 4.7 V
 2. `f` / `b` – motor direction OK (forward = voltage up)
 3. `w` – board reboots once and shows Rst:WATCHDOG
-4. `c` – calibration values accepted
+4. `c` – calibration values (from `final_safe.ino`) accepted
 
 Then with final_safe.ino: pull sensor wire → `SENSOR FAULT`; reset in D → stays D;
 P or R without brake → `PRESS BRAKE`; push actuator off position → pulls back.
@@ -69,7 +73,7 @@ Not yet tested on hardware.
 ## Logic test (no hardware)
 
 `test/sim.test.mjs` runs the compiled `final_safe.ino` in an ATmega328P simulator
-(avr8js) against a simple actuator model and checks 28 scenarios: interlocks, button
+(avr8js) against a simple actuator model and checks 30 scenarios (two of them run `diag.ino` too): interlocks, button
 noise, sensor glitch / fault / recovery, stall, wrong direction, hold, limp mode, reset
 cause. Needs Node.js and `arduino-cli`.
 
