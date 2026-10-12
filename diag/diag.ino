@@ -433,6 +433,7 @@ void setup(){
   bootFlags = resetFlags();
 
   Serial.begin(115200);
+  Serial.println(F("diag.ino built " __DATE__ " " __TIME__));
   printHelp();
   printResetLog();
   loadCalibration();

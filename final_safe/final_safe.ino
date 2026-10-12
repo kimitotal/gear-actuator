@@ -578,6 +578,7 @@ void updateLcd(float v, unsigned long now){
 /**************** SETUP ****************/
 void setup(){
   Serial.begin(115200);   // first: faults found during start-up are printed too
+  Serial.println(F("final_safe.ino built " __DATE__ " " __TIME__));   // which sketch is on this board
 
   // 1) Outputs to a safe state FIRST
   digitalWrite(PIN_ENA, LOW);

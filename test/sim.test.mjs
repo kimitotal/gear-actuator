@@ -615,3 +615,8 @@ test('Serial: one line per shift, message and fault', () => {
   assert.match(blocked.serial, /\] MOTOR BLOCKED 2\.\d\dV/);
   if (process.env.SHOW_SERIAL) console.log(s.serial + blocked.serial);
 });
+
+test('Serial: both sketches say when they were built, as their first line', () => {
+  assert.match(new Sim(D).serial, /^final_safe\.ino built \w{3} [ \d]\d \d{4} \d\d:\d\d:\d\d\r\n/);
+  assert.match(new Sim(D, { hex: diagProgram }).serial, /^diag\.ino built \w{3} [ \d]\d \d{4} /);
+});
