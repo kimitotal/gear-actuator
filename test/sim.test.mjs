@@ -589,3 +589,29 @@ test('inertia: a very slow-stopping actuator (100-500 ms) ends in the right gear
     assert.ok(r.worst <= 3, `brake ${brake} ms: motor reversed ${r.worst} times in one shift`);
   }
 });
+
+test('Serial: one line per shift, message and fault', () => {
+  const s = new Sim(D);
+  s.press('N');
+  s.settle();
+  assert.match(s.serial, /\[\d+\.\ds\] D -> N ok \d\.\d\ds 2\.0\dV/);
+
+  s.press('P');                                 // no brake
+  s.settle();
+  assert.match(s.serial, /\] PRESS BRAKE 2\.0\dV/);
+
+  s.v += 0.2;                                   // pushed off: hold pulls it back
+  s.run(1500);
+  assert.match(s.serial, /\] hold N ok /);
+
+  s.sensor = () => 0; s.run(300);
+  assert.match(s.serial, /\] SENSOR FAULT 0\.00V/);
+
+  const blocked = new Sim(D);
+  blocked.press('N', 150);
+  blocked.runUntil(() => blocked.v < 2.5, 2000);
+  blocked.blocked = true;
+  blocked.run(2000);
+  assert.match(blocked.serial, /\] MOTOR BLOCKED 2\.\d\dV/);
+  if (process.env.SHOW_SERIAL) console.log(s.serial + blocked.serial);
+});
