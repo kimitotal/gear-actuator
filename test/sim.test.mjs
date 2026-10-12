@@ -384,8 +384,7 @@ test('LCD: boot screen, voltage line, brake indicator and shift arrow', () => {
   s.brake(true); s.run(400);
   assert.equal(s.lcd.line(1), '2.80V BRAKE');
   s.brake(false); s.press('P'); s.run(400);          // blocked: message on line 1, gear stays
-  assert.ok(s.lcdLog.includes('Gear: D|PRESS BRAKE'), s.lcdLog.slice(-4).join('
-'));
+  assert.ok(s.lcdLog.includes('Gear: D|PRESS BRAKE'));
   s.run(1500);
   s.brake(false);
   s.hold('N'); s.runUntil(() => s.v < 2.6, 2000); s.release('N');
