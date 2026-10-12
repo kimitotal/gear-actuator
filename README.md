@@ -65,7 +65,7 @@ Not yet tested on hardware.
 ## Logic test (no hardware)
 
 `test/sim.test.mjs` runs the compiled `final_safe.ino` in an ATmega328P simulator
-(avr8js) against a simple actuator model and checks 22 scenarios: interlocks, button
+(avr8js) against a simple actuator model and checks 24 scenarios: interlocks, button
 noise, sensor glitch / fault / recovery, stall, wrong direction, hold, limp mode, reset
 cause. Needs Node.js and `arduino-cli`.
 
