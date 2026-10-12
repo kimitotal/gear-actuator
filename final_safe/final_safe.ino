@@ -1,7 +1,7 @@
 /************************************************************
  * Gear actuator with ANALOG position feedback – SAFE version
  *
- * What changed vs. final.ino
+ * What changed vs. the original final.ino (removed from the repo, see git history)
  *  - NO shift at power-up / reset. The sensor is read and the gear the
  *    actuator is ALREADY in is adopted. A reset while driving no longer
  *    sends the gearbox to P. Position hold is active from boot, so it may
