@@ -8,11 +8,13 @@ sensor on A0 closes the loop.
 | File | Purpose |
 |---|---|
 | `kalibracija/kalibracija.ino` | Jog the actuator with D/N buttons and read the voltage for each gear |
-| `final/final.ino` | Original version (known safety problems, kept for reference) |
 | `final_safe/final_safe.ino` | Hardened version – use this one |
 | `diag/diag.ino` | Bench / parked diagnostics (live inputs, noise, Vcc, reset log, motor tests) |
 
 ## Known problem with the original
+
+The original sketch (`final/final.ino`) was removed so it cannot be flashed by mistake; it
+is still in the git history (commit `454ae2a`).
 
 While driving, the gearbox got hot and the system started changing gear on its own.
 Likely causes: Arduino resets (heat / supply brownout) triggering the auto-park at
