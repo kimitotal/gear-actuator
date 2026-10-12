@@ -75,13 +75,6 @@ const uint8_t PIN_BTN_D = 7;
 
 const uint8_t PIN_BRAKE   = 10;  // LOW = brake pressed
 
-/**************** SAFETY CONFIG ****************/
-const bool REQUIRE_BRAKE_FOR_P         = true;
-const bool REQUIRE_BRAKE_TO_LEAVE_P   = true;
-const bool REQUIRE_BRAKE_FOR_R        = true;
-const bool REQUIRE_BRAKE_FROM_UNKNOWN = true;  // leaving "-" (except to N)
-const bool ENABLE_POSITION_HOLD       = true;
-
 /**************** CALIBRATION ****************/
 const float ADC_VREF     = 5.00f;
 const float POS_MIN_V_OK = 0.20f;   // below = broken wire / short to GND
@@ -451,7 +444,7 @@ void holdMonitor(float v, unsigned long now){
   if (now - driftSince < DRIFT_CONFIRM_MS) return;
   drifting = false;
 
-  if (!ENABLE_POSITION_HOLD || holdSuspended){
+  if (holdSuspended){
     // not allowed to move: at least make the shown gear match reality
     if (err > DETECT_WIN_V){
       event(EV_OUT_OF_GEAR);                  // logged with the gear it fell out of
@@ -472,12 +465,10 @@ void holdMonitor(float v, unsigned long now){
 
 /**************** SHIFT REQUESTS ****************/
 const char* shiftBlockReason(Gear from, Gear to){
-  bool brake   = inBrake.stable;
-  if (to == G_P && REQUIRE_BRAKE_FOR_P && !brake)                      return "PRESS BRAKE";
-  if (to == G_R && REQUIRE_BRAKE_FOR_R && !brake)                      return "PRESS BRAKE";
-  if (from == G_P && REQUIRE_BRAKE_TO_LEAVE_P && !brake)               return "PRESS BRAKE";
-  if (from == G_NONE && to != G_N && REQUIRE_BRAKE_FROM_UNKNOWN && !brake) return "PRESS BRAKE";
-  return nullptr;
+  // The brake is needed to select P or R, to leave P, and to leave an unknown
+  // position (except to N).
+  bool needsBrake = to == G_P || to == G_R || from == G_P || (from == G_NONE && to != G_N);
+  return (needsBrake && !inBrake.stable) ? "PRESS BRAKE" : nullptr;
 }
 
 void requestShift(Gear g, float v){
