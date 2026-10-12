@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Install AVR core and LCD library
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install arduino:avr@1.8.8
+          arduino-cli lib install "LiquidCrystal I2C@1.1.2"
+
+      - name: Compile sketches
+        run: |
+          for s in final_safe diag kalibracija; do
+            arduino-cli compile -b arduino:avr:uno --warnings all "$s"
+          done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Simulator logic test (final_safe.ino)
+        working-directory: test
+        run: |
+          npm ci
+          npm test
