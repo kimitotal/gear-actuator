@@ -2,12 +2,12 @@
  * DIAGNOSTIC sketch for the gear actuator  (diag.ino)
  * BENCH / PARKED USE ONLY – do not drive with this sketch.
  *
- * Same wiring as final_safe.ino (incl. D2 = STOPPED, D10 = BRAKE).
+ * Same wiring as final_safe.ino (D10 = BRAKE).
  * The motor NEVER moves on its own – only on a serial command.
  *
  * LCD pages (rotate every 3 s; any input change jumps to page 1 for 5 s)
  *   1  2.803V G:D OK        position, detected gear, sensor range
- *      P... BRK STOP        buttons held, brake, vehicle-stopped input
+ *      P... BRK             buttons held, brake
  *   2  Vcc4.98 min4.71      5 V supply now / lowest seen
  *      Spk P0R0N0D0         noise spikes per button (<20 ms pulses)
  *   3  Noise12 pk40 mV      position sensor noise (peak-to-peak / 1 s)
@@ -29,7 +29,7 @@
 
 // Before any function: the builder puts its generated prototypes up here.
 enum Gear : uint8_t { G_NONE, G_P, G_R, G_N, G_D };
-enum { I_P, I_R, I_N, I_D, I_STOP, I_BRK, I_COUNT };
+enum { I_P, I_R, I_N, I_D, I_BRK, I_COUNT };
 
 /**************** RESET CAUSE CAPTURE ****************/
 uint8_t g_mcusr __attribute__((section(".noinit")));
@@ -47,8 +47,8 @@ const uint8_t PIN_ENA = 3, PIN_IN1 = 8, PIN_IN2 = 9;
 const uint8_t PIN_POS = A0;
 
 // inputs: index order matters for the interrupt code below
-const uint8_t inPins[I_COUNT]  = {4, 5, 6, 7, 2, 10};
-const char* const inNames[I_COUNT] = {"P", "R", "N", "D", "STOP", "BRK"};
+const uint8_t inPins[I_COUNT]  = {4, 5, 6, 7, 10};
+const char* const inNames[I_COUNT] = {"P", "R", "N", "D", "BRK"};
 
 /**************** CALIBRATION – copy the SAME values as final_safe.ino ****************/
 const float ADC_VREF     = 5.00f;
@@ -73,13 +73,13 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);   // if blank, try 0x3F
 volatile uint16_t spikes[I_COUNT];
 volatile uint32_t activeSince[I_COUNT];
 volatile uint8_t  lastPIND, lastPINB;
-const uint8_t pdBit[5] = {4, 5, 6, 7, 2};   // PORTD bits for P R N D STOP
+const uint8_t pdBit[4] = {4, 5, 6, 7};   // PORTD bits for P R N D
 
 ISR(PCINT2_vect){
   uint8_t now = PIND, ch = now ^ lastPIND;
   lastPIND = now;
   uint32_t t = micros();
-  for (uint8_t i = 0; i < 5; i++){
+  for (uint8_t i = 0; i < 4; i++){
     uint8_t m = _BV(pdBit[i]);
     if (!(ch & m)) continue;
     if (!(now & m)) activeSince[i] = t;                                   // went LOW (active)
@@ -213,9 +213,9 @@ void updateLcd(unsigned long now, float v){
     dtostrf(v, 5, 3, a);
     snprintf(l0, sizeof l0, "%sV G:%c %s", a, gearCh(g),
              v < POS_MIN_V_OK ? "LOW!" : v > POS_MAX_V_OK ? "HIGH" : "OK");
-    snprintf(l1, sizeof l1, "%c%c%c%c %s %s",
+    snprintf(l1, sizeof l1, "%c%c%c%c %s",
              act(I_P) ? 'P' : '.', act(I_R) ? 'R' : '.', act(I_N) ? 'N' : '.', act(I_D) ? 'D' : '.',
-             act(I_BRK) ? "BRK" : "---", act(I_STOP) ? "STOP" : "MOVE");
+             act(I_BRK) ? "BRK" : "---");
   } else if (page == 1){
     uint16_t s[I_COUNT]; readSpikes(s);
     dtostrf(vccNow, 4, 2, a); dtostrf(vccMin, 4, 2, b);
@@ -387,7 +387,7 @@ void setup(){
   pinMode(PIN_POS, INPUT);
   delay(5);
   lastPIND = PIND; lastPINB = PINB;
-  PCMSK2 = _BV(PCINT18) | _BV(PCINT20) | _BV(PCINT21) | _BV(PCINT22) | _BV(PCINT23); // D2,D4-D7
+  PCMSK2 = _BV(PCINT20) | _BV(PCINT21) | _BV(PCINT22) | _BV(PCINT23); // D4-D7
   PCMSK0 = _BV(PCINT2);                                                              // D10
   PCIFR  = _BV(PCIF2) | _BV(PCIF0);
   PCICR |= _BV(PCIE2) | _BV(PCIE0);
