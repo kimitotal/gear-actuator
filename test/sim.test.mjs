@@ -616,6 +616,43 @@ test('Serial: one line per shift, message and fault', () => {
   if (process.env.SHOW_SERIAL) console.log(s.serial + blocked.serial);
 });
 
+test('diag.ino calibration mode: buttons jog only while it is on, stored voltages are printed', () => {
+  const s = new Sim(N, { hex: diagProgram });
+  s.hold('D'); s.run(500); s.release('D');
+  assert.equal(s.drivenMs, 0, 'buttons moved the motor outside calibration mode');
+  assert.ok(s.send('3').includes('Send k first'));
+
+  assert.ok(s.send('k').includes('CALIBRATION MODE ON'));
+  s.hold('D'); s.run(1000); s.release('D'); s.run(200);
+  assert.ok(s.v > N + 0.2, `D did not move it forward, v=${s.v}`);
+  assert.equal(s.drive(), 0);
+  const atD = s.v;
+  const stored = s.send('4').match(/D = (\d\.\d+) V stored/);
+  assert.ok(stored && near(+stored[1], atD, 0.01), `stored ${stored} at v=${atD}`);   // ADC rounds to ~5 mV
+
+  s.hold('N'); s.run(1000); s.release('N'); s.run(200);
+  assert.ok(s.v < atD - 0.2, `N did not move it back, v=${s.v}`);
+  s.send('3');
+
+  s.hold('N', 'D'); s.run(500); s.release('N', 'D');       // both at once: no movement
+  const out = s.send('k');
+  assert.ok(out.includes('// P not stored'), out);
+  const pasted = out.match(/const float TARGET_D_V = (\d\.\d\d)f;/);
+  assert.ok(pasted && near(+pasted[1], atD, 0.015), out);
+  assert.ok(out.includes('const float TARGET_N_V = '), out);
+
+  s.hold('D'); s.run(500); s.release('D');                 // mode is off again
+  assert.equal(s.drive(), 0);
+});
+
+test('diag.ino calibration mode: jogging stops before the sensor limit', () => {
+  const s = new Sim(P, { hex: diagProgram });
+  s.send('k');
+  s.hold('N'); s.run(4000);                                // backward, towards 0 V
+  assert.equal(s.drive(), 0);
+  assert.ok(s.v > 0.2 + 0.2, `ran to v=${s.v}`);           // POS_MIN_V_OK is 0.20 V
+});
+
 test('Serial: both sketches say when they were built, as their first line', () => {
   assert.match(new Sim(D).serial, /^final_safe\.ino built \w{3} [ \d]\d \d{4} \d\d:\d\d:\d\d\r\n/);
   assert.match(new Sim(D, { hex: diagProgram }).serial, /^diag\.ino built \w{3} [ \d]\d \d{4} /);

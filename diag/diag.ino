@@ -3,7 +3,8 @@
  * BENCH / PARKED USE ONLY – do not drive with this sketch.
  *
  * Same wiring as final_safe.ino (D10 = BRAKE).
- * The motor NEVER moves on its own – only on a serial command.
+ * The motor NEVER moves on its own – only on a serial command, or from the
+ * D / N buttons after calibration mode has been switched on with 'k'.
  *
  * LCD pages (rotate every 3 s; any input change jumps to page 1 for 5 s)
  *   1  2.803V G:D OK        position, detected gear, sensor range
@@ -19,6 +20,8 @@
  *   c check calibration                    l reset + event log (from final_safe)
  *   x clear both logs                      z zero noise/Vcc counters
  *   w watchdog test (board must reboot once and show Rst:WATCHDOG)
+ *   k calibration mode on/off: hold D / N to move the actuator,
+ *     1 2 3 4 store the voltage as P R N D, k again prints them
  ************************************************************/
 
 #include <Arduino.h>
@@ -223,8 +226,55 @@ void lcd2(const char* a, const char* b){ lcdLine(0, a); lcdLine(1, b); }
 
 unsigned u99(uint16_t x){ return x > 99 ? 99 : x; }
 
+/**************** CALIBRATION MODE ****************/
+// Finds the gear voltages (this replaces the old kalibracija.ino).
+// 'k' turns it on and off. While it is on:
+//   hold D = actuator forward (voltage up), hold N = backward – slow, and it
+//            stops 0.3 V before the sensor limits
+//   1 2 3 4 = remember the present voltage as P R N D
+// Turning it off prints the lines to paste into final_safe.ino.
+bool  calMode = false;
+float calV[4] = {NAN, NAN, NAN, NAN};
+
+void calJog(float v){
+  bool fwd = act(I_D), back = act(I_N), ok = posInRange(v);
+  if (fwd && !back && ok && v < POS_MAX_V_OK - 0.3f)       motorDrive(JOG_PWM, true);
+  else if (back && !fwd && ok && v > POS_MIN_V_OK + 0.3f)  motorDrive(JOG_PWM, false);
+  else                                                     motorBrake();
+}
+
+void calToggle(){
+  calMode = !calMode;
+  motorBrake();
+  if (calMode){
+    Serial.println(F("CALIBRATION MODE ON: hold D = forward, N = backward. Send 1 2 3 4 to store P R N D, k to finish."));
+    return;
+  }
+  Serial.println(F("CALIBRATION MODE OFF. Paste into final_safe.ino:"));
+  const char n[4] = {'P', 'R', 'N', 'D'};
+  for (uint8_t i = 0; i < 4; i++){
+    if (isnan(calV[i])){ Serial.print(F("// ")); Serial.print(n[i]); Serial.println(F(" not stored")); continue; }
+    Serial.print(F("const float TARGET_")); Serial.print(n[i]); Serial.print(F("_V = "));
+    Serial.print(calV[i], 2); Serial.println(F("f;"));
+  }
+}
+
+void calStore(uint8_t i){
+  if (!calMode){ Serial.println(F("Send k first (calibration mode).")); return; }
+  motorBrake();
+  delay(150);                                   // let it come to rest
+  calV[i] = readPosV();
+  Serial.print("PRND"[i]); Serial.print(F(" = ")); Serial.print(calV[i], 3); Serial.println(F(" V stored"));
+}
+
 void updateLcd(unsigned long now, float v){
   char l0[17], l1[17], a[8], b[8];
+  if (calMode){
+    dtostrf(v, 5, 3, a);
+    snprintf(l0, sizeof l0, "CAL %sV", a);
+    lcd2(l0, "D> fwd   N< back");
+    return;
+  }
   uint8_t page = (now - liveAt < 5000) ? 0 : (now / 3000) % 3;
 
   if (page == 0){
@@ -255,6 +305,7 @@ void printHelp(){
   Serial.println(F(" c calibration check      l reset + event log"));
   Serial.println(F(" x clear both logs        z zero counters"));
   Serial.println(F(" w watchdog test (must reboot ONCE)"));
+  Serial.println(F(" k calibration mode: hold D/N to move, 1 2 3 4 store P R N D, k again prints the values"));
   Serial.println(F(" Noise test: send z, then do NOT touch buttons, start engine,"));
   Serial.println(F(" run fan/lights/wipers; spikes should stay 0.\n"));
 }
@@ -409,6 +460,8 @@ void handleSerial(){
     case 'x': clearResetLog(); break;
     case 'z': zeroCounters(); Serial.println(F("Counters zeroed.")); break;
     case 'w': watchdogTest(); break;
+    case 'k': calToggle(); break;
+    case '1': case '2': case '3': case '4': calStore(c - '1'); break;
     default: break;   // ignore newlines etc.
   }
 }
@@ -459,6 +512,7 @@ void loop(){
   handleSerial();
 
   float v = readPosV();
+  if (calMode) calJog(v);
 
   // sensor noise: raw min/max over 1 s
   int raw = analogRead(PIN_POS);

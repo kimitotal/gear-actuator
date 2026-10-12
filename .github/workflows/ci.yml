@@ -21,7 +21,7 @@ jobs:
 
       - name: Compile sketches
         run: |
-          for s in final_safe diag kalibracija; do
+          for s in final_safe diag; do
             arduino-cli compile -b arduino:avr:uno --warnings all "$s"
           done
 
