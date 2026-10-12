@@ -108,6 +108,7 @@ const unsigned long MOVE_TIMEOUT_MS      = 5000;
 const unsigned long STALL_MS             = 500;    // no progress this long = stall
 const float         STALL_MIN_DV         = 0.02f;
 const float         WRONG_DIR_V          = 0.15f;  // moved this far the wrong way
+const uint8_t       WRONG_DIR_READINGS   = 10;     // ...for this many readings in a row (~25 ms)
 const unsigned long BTN_STABLE_MS        = 80;
 const unsigned long INPUT_STABLE_MS      = 30;
 const unsigned long DRIFT_CONFIRM_MS     = 200;
@@ -214,7 +215,7 @@ Gear detectGear(float v){
 }
 
 char gearCh(Gear g){
-  return (g==G_P)?'P':(g==G_R)?'R':(g==G_N)?'N':(g==G_D)?'D':'-';
+  return (g==G_P)?'P':(g==G_R)?'R':(g==G_N)?'N':(g==G_D)?'D':'?';
 }
 
 bool checkCalibration(){
@@ -238,6 +239,7 @@ struct Move {
   bool  progressFwd;         // drive direction at that moment
   unsigned long progressT;
   float startAbsDiff;
+  uint8_t wrongN;            // consecutive wrong-direction readings
 } mv;
 
 /**************** FAULTS ****************/
@@ -282,9 +284,9 @@ bool faultJog(Gear req, unsigned long now){
       jog = req; jogStart = now;
       currentGear = G_NONE;
       recovering = false;
-      showMsg(req == G_P ? "JOG -> P" : "JOG -> D");
+      showMsg(req == G_P ? "MANUAL -> P" : "MANUAL -> D");
     } else showMsg("PRESS BRAKE");
-  } else if (req != G_NONE) showMsg("FAULT: NO SHIFT");
+  } else if (req != G_NONE) showMsg("HOLD P/D + BRAKE");
 
   // raw pin, not debounced: letting go must stop the motor at once
   bool held = (jog == G_P) ? btnP.lastRaw : (jog == G_D) ? btnD.lastRaw : false;
@@ -310,6 +312,7 @@ void startMove(Gear g, bool correction, float v){
   mv.startAbsDiff = fabs(mv.targetV - v);
   mv.progressAdiff = mv.startAbsDiff;
   mv.progressFwd   = mv.targetV > v;
+  mv.wrongN        = 0;
   state = ST_MOVING;
 }
 
@@ -341,15 +344,20 @@ void runMove(float v, unsigned long now){
   }
   mv.inZone = false;
 
-  if (now - mv.startT > MOVE_TIMEOUT_MS)       { endMove(false, "MOVE TIMEOUT", v);    return; }
-  if (adiff > mv.startAbsDiff + WRONG_DIR_V)   { endMove(false, "WRONG DIRECTION", v); return; }
+  if (now - mv.startT > MOVE_TIMEOUT_MS)       { endMove(false, "SHIFT TOO SLOW", v);    return; }
+  // One wild reading (a sensor wire dropping out passes through every voltage)
+  // must not abort the shift: it has to be wrong several readings in a row.
+  if (adiff <= mv.startAbsDiff + WRONG_DIR_V) mv.wrongN = 0;
+  else if (++mv.wrongN >= WRONG_DIR_READINGS)  { endMove(false, "MOTOR REVERSED?", v); return; }
 
   // Progress = getting CLOSER (or reversing after an overshoot). Sensor noise
-  // wobbling back and forth must not keep a stalled motor powered.
-  if (fwd != mv.progressFwd || mv.progressAdiff - adiff >= STALL_MIN_DV){
+  // wobbling back and forth must not keep a stalled motor powered. If the
+  // distance is suddenly far above the best seen, that best was a bad reading.
+  if (fwd != mv.progressFwd || mv.progressAdiff - adiff >= STALL_MIN_DV ||
+      adiff - mv.progressAdiff > WRONG_DIR_V){
     mv.progressAdiff = adiff; mv.progressFwd = fwd; mv.progressT = now;
   }
-  else if (now - mv.progressT > STALL_MS)      { endMove(false, "STALL", v);           return; }
+  else if (now - mv.progressT > STALL_MS)      { endMove(false, "MOTOR BLOCKED", v);           return; }
 
   motorDrive(adiff < SLOW_BAND_V ? PWM_SLOW : PWM_FAST, fwd);
 }
@@ -367,7 +375,7 @@ void holdMonitor(float v, unsigned long now){
     // not allowed to move: at least make the shown gear match reality
     if (err > DETECT_WIN_V){
       currentGear = detectGear(v);
-      showMsg("GEAR LOST");
+      showMsg("OUT OF GEAR");
     }
     return;
   }
@@ -375,7 +383,7 @@ void holdMonitor(float v, unsigned long now){
   if (now - corrWindowStart > CORRECTION_WINDOW_MS){ corrWindowStart = now; correctionCount = 0; }
   if (++correctionCount > MAX_CORRECTIONS){
     holdSuspended = true;
-    showMsg("HOLD FAILED");
+    showMsg("CANT HOLD GEAR");
     if (err > DETECT_WIN_V) currentGear = detectGear(v);
     return;
   }
@@ -393,11 +401,13 @@ const char* shiftBlockReason(Gear from, Gear to){
 }
 
 void requestShift(Gear g, float v){
-  // same gear again = re-seat it, if it sits off-centre (e.g. after HOLD FAILED)
+  // same gear again = re-seat it, if it sits off-centre (e.g. after CANT HOLD GEAR)
   if (g == currentGear && fabs(v - targetVof(g)) <= HOLD_TOL_V) return;
   const char* why = shiftBlockReason(currentGear, g);
   if (why){ showMsg(why); return; }
   startMove(g, false, v);
+  updateLcd(v, millis());    // show "D -> N" now: no LCD refresh while the motor runs
+  mv.startT = mv.progressT = millis();   // the LCD write must not eat into the timeouts
 }
 
 Gear readButtons(unsigned long now){
@@ -408,7 +418,7 @@ Gear readButtons(unsigned long now){
   if (!(eP || eR || eN || eD)) return G_NONE;
   // raw, not debounced: a second button that is only just going down counts too
   uint8_t held = btnP.lastRaw + btnR.lastRaw + btnN.lastRaw + btnD.lastRaw;
-  if (held > 1){ showMsg("BUTTON FAULT"); return G_NONE; }
+  if (held > 1){ showMsg("2 BUTTONS HELD"); return G_NONE; }
   return eP ? G_P : eR ? G_R : eN ? G_N : G_D;
 }
 
@@ -470,15 +480,17 @@ void lcdLine(uint8_t row, const char* s){
 void updateLcd(float v, unsigned long now){
   if (!lcdOk) return;
   char l0[17], l1[17], vs[8];
-  if (msgText[0] && now - msgAt < MSG_MS)
+  if (state == ST_MOVING)                      // drawn once, by requestShift()
+    snprintf(l0, sizeof l0, "%c -> %c", gearCh(currentGear), gearCh(mv.target));
+  else if (msgText[0] && now - msgAt < MSG_MS)
     snprintf(l0, sizeof l0, "%s", msgText);
   else if (state == ST_FAULT)
-    snprintf(l0, sizeof l0, "FLT %s", faultText);
+    snprintf(l0, sizeof l0, "%s", faultText);
   else
-    snprintf(l0, sizeof l0, "Gear:%c%s", gearCh(currentGear), holdSuspended ? " NOHOLD" : "");
+    snprintf(l0, sizeof l0, "Gear: %c", gearCh(currentGear));
 
-  dtostrf(v, 5, 3, vs);
-  snprintf(l1, sizeof l1, "%sV %s", vs, inBrake.stable ? "BRK" : "---");
+  dtostrf(v, 4, 2, vs);
+  snprintf(l1, sizeof l1, "%sV %s", vs, inBrake.stable ? "BRAKE" : "");
   g_lcdBusy = LCD_BUSY_MAGIC;
   lcdLine(0, l0);
   lcdLine(1, l1);
@@ -502,8 +514,8 @@ void setup(){
   // 3) Adopt the gear the actuator is ALREADY in – never move at boot
   calOk = checkCalibration();
   float v = readPosV();
-  if (!calOk)                enterFault("CALIBRATION");
-  else if (!posInRange(v))   enterFault("POS SENSOR");
+  if (!calOk)                enterFault("BAD CALIBRATION");
+  else if (!posInRange(v))   enterFault("SENSOR FAULT");
   else {
     currentGear = detectGear(v);
   }
@@ -536,10 +548,9 @@ void setup(){
     lcd.init();
     lcd.backlight();
     char l0[17], l1[17];
-    snprintf(l0, sizeof l0, "RST:%s", resetName(rf));
-    snprintf(l1, sizeof l1, "B%uW%uE%uP%u",   // fits 16 chars even at 255
-             EEPROM.read(EE_CNT_BOR), EEPROM.read(EE_CNT_WDT),
-             EEPROM.read(EE_CNT_EXT), EEPROM.read(EE_CNT_PWR));
+    snprintf(l0, sizeof l0, "Start: %s", resetName(rf));
+    // the two counts that mean trouble; all four are on Serial and in diag.ino
+    snprintf(l1, sizeof l1, "WD:%u BO:%u", EEPROM.read(EE_CNT_WDT), EEPROM.read(EE_CNT_BOR));
     lcdLine(0, l0);
     lcdLine(1, l1);
     g_lcdBusy = 0;
@@ -562,7 +573,7 @@ void loop(){
   static unsigned long posOkAt = 0;
   bool posOk = posInRange(v);
   if (posOk) posOkAt = now;
-  else if (state != ST_FAULT && now - posOkAt >= SENSOR_FAULT_MS) enterFault("POS SENSOR");
+  else if (state != ST_FAULT && now - posOkAt >= SENSOR_FAULT_MS) enterFault("SENSOR FAULT");
 
   if (!posOk && state != ST_FAULT) motorBrake();   // unconfirmed glitch: don't act on a bad reading
   else switch (state){

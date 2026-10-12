@@ -52,7 +52,7 @@ Fails safe: a broken wire blocks P/R and leaving P.
 3. `w` – board reboots once and shows Rst:WATCHDOG
 4. `c` – calibration values accepted
 
-Then with final_safe.ino: pull sensor wire → `FLT POS SENSOR`; reset in D → stays D;
+Then with final_safe.ino: pull sensor wire → `SENSOR FAULT`; reset in D → stays D;
 P or R without brake → `PRESS BRAKE`; push actuator off position → pulls back.
 
 ## Build
@@ -65,7 +65,7 @@ Not yet tested on hardware.
 ## Logic test (no hardware)
 
 `test/sim.test.mjs` runs the compiled `final_safe.ino` in an ATmega328P simulator
-(avr8js) against a simple actuator model and checks 21 scenarios: interlocks, button
+(avr8js) against a simple actuator model and checks 22 scenarios: interlocks, button
 noise, sensor glitch / fault / recovery, stall, wrong direction, hold, limp mode, reset
 cause. Needs Node.js and `arduino-cli`.
 

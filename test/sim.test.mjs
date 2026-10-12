@@ -119,7 +119,7 @@ class Sim {
     const speed = duty <= 0.35 ? 0 : (duty - 0.35) / 0.65 * 2.2;  // V/s; PWM 220 ~1.7, PWM 140 ~0.7
     if (!this.blocked) this.v = Math.min(3.2, Math.max(0.3, this.v + Math.sign(drive) * speed / 1000));
     this.adc.channelValues[0] = Math.min(5, Math.max(0, this.sensor(this.v)));
-    const l = this.lcd.line(0);
+    const l = this.lcd.line(0) + '|' + this.lcd.line(1);
     if (l !== this.lcdLog.at(-1)) this.lcdLog.push(l);
   }
 
@@ -146,7 +146,7 @@ class Sim {
     this.run(300);
     this.runUntil(() => !this.drive(), 6000);
     this.run(300);                                   // LCD is not refreshed while moving
-    this.runUntil(() => /^(Gear:|FLT )/.test(this.lcd.line(0)), 2500);
+    this.runUntil(() => /^(Gear: |SENSOR FAULT|BAD CALIBRATION)/.test(this.lcd.line(0)), 2500);
     this.run(60);                                    // let the LCD finish writing the line
     return this.lcd.line(0);
   }
@@ -157,20 +157,20 @@ const near = (v, target, tol = 0.035) => Math.abs(v - target) <= tol;
 
 test('boot: adopts the gear it is in and never moves', () => {
   const s = new Sim(D);
-  assert.equal(s.settle(), 'Gear:D NOHOLD');
+  assert.equal(s.settle(), 'Gear: D');
   assert.equal(s.drivenMs, 0);
 });
 
 test('boot between gears: gear unknown, still no movement', () => {
   const s = new Sim(2.4);
-  assert.equal(s.settle(), 'Gear:- NOHOLD');
+  assert.equal(s.settle(), 'Gear: ?');
   assert.equal(s.drivenMs, 0);
 });
 
 test('D -> N needs no brake', () => {
   const s = new Sim(D);
   s.press('N');
-  assert.equal(s.settle(), 'Gear:N');
+  assert.equal(s.settle(), 'Gear: N');
   assert.ok(near(s.v, N), `v=${s.v}`);
 });
 
@@ -182,7 +182,7 @@ test('P needs the brake', () => {
   assert.equal(s.drivenMs, 0);
   s.brake(true);
   s.press('P');
-  assert.equal(s.settle(), 'Gear:P');
+  assert.equal(s.settle(), 'Gear: P');
   assert.ok(near(s.v, P), `v=${s.v}`);
 });
 
@@ -194,7 +194,7 @@ test('leaving P needs the brake', () => {
   assert.equal(s.drivenMs, 0);
   s.brake(true);
   s.press('D');
-  assert.equal(s.settle(), 'Gear:D');
+  assert.equal(s.settle(), 'Gear: D');
   assert.ok(near(s.v, D), `v=${s.v}`);
 });
 
@@ -205,7 +205,7 @@ test('R needs the brake', () => {
   assert.equal(s.drivenMs, 0);
   s.brake(true);
   s.press('R');
-  assert.equal(s.settle(), 'Gear:R');
+  assert.equal(s.settle(), 'Gear: R');
   assert.ok(near(s.v, R), `v=${s.v}`);
 });
 
@@ -215,7 +215,7 @@ test('releasing the brake mid-shift does not abort the shift', () => {
   s.hold('P'); s.run(200); s.release('P');
   s.runUntil(() => s.v < 2.0, 3000);
   s.brake(false);
-  assert.equal(s.settle(), 'Gear:P');
+  assert.equal(s.settle(), 'Gear: P');
   assert.ok(near(s.v, P), `v=${s.v}`);
 });
 
@@ -224,25 +224,29 @@ test('two buttons at once are ignored', () => {
   s.brake(true);
   s.hold('N', 'P'); s.run(300); s.release('N', 'P');
   s.settle();
-  assert.ok(s.saw('BUTTON FAULT'));
+  assert.ok(s.saw('2 BUTTONS HELD'));
   assert.equal(s.drivenMs, 0);
 });
 
 test('a 40 ms noise pulse on a button wire is ignored', () => {
   const s = new Sim(D);
   for (let i = 0; i < 20; i++) { s.press('N', 40); s.run(40); }
-  assert.equal(s.settle(), 'Gear:D NOHOLD');
+  assert.equal(s.settle(), 'Gear: D');
   assert.equal(s.drivenMs, 0);
 });
 
 test('50 ms sensor glitch mid-shift: no fault, shift completes', () => {
-  const s = new Sim(D);
-  s.press('N', 150);
-  s.runUntil(() => s.v < 2.6, 2000);
-  s.sensor = () => 0; s.run(50); s.sensor = v => v;
-  assert.equal(s.settle(), 'Gear:N');
-  assert.ok(!s.saw('FLT'));
-  assert.ok(near(s.v, N), `v=${s.v}`);
+  // several start times: the glitch edge lands differently in the ADC averaging
+  for (const extraMs of [0, 0.4, 0.9, 1.3, 1.8, 2.2]) {
+    const s = new Sim(D);
+    s.press('N', 150);
+    s.runUntil(() => s.v < 2.6, 2000);
+    s.run(extraMs);
+    s.sensor = () => 0; s.run(50); s.sensor = v => v;
+    assert.equal(s.settle(), 'Gear: N', `glitch +${extraMs} ms: ${s.lcdLog.slice(-3)}`);
+    assert.ok(!s.saw('SENSOR FAULT'));
+    assert.ok(near(s.v, N), `v=${s.v}`);
+  }
 });
 
 test('sensor wire off for 300 ms mid-shift: fault, motor off, then recovers', () => {
@@ -255,15 +259,15 @@ test('sensor wire off for 300 ms mid-shift: fault, motor off, then recovers', ()
   assert.equal(s.v, vAtFault);
   assert.equal(s.drivenMs, drivenAtFault);
   s.run(300);
-  assert.equal(s.lcd.line(0), 'FLT POS SENSOR');
+  assert.equal(s.lcd.line(0), 'SENSOR FAULT');
   s.sensor = v => v;
   s.run(1300);
   assert.ok(s.saw('SENSOR OK'));
-  assert.equal(s.settle(), 'Gear:- NOHOLD');
+  assert.equal(s.settle(), 'Gear: ?');
   assert.equal(s.drivenMs, drivenAtFault);
 });
 
-test('jammed actuator with a noisy sensor is given up on quickly (STALL)', () => {
+test('jammed actuator with a noisy sensor is given up on quickly (MOTOR BLOCKED)', () => {
   const s = new Sim(D);
   s.press('N', 150);
   s.runUntil(() => s.v < 2.5, 2000);
@@ -274,34 +278,34 @@ test('jammed actuator with a noisy sensor is given up on quickly (STALL)', () =>
   s.run(3000);
   assert.equal(s.drive(), 0);
   assert.ok(s.drivenMs - before < 1500, `motor powered ${s.drivenMs - before} ms while jammed`);
-  assert.ok(s.saw('STALL'));
+  assert.ok(s.saw('MOTOR BLOCKED'));
 });
 
-test('motor wired backwards is caught (WRONG DIRECTION)', () => {
+test('motor wired backwards is caught (MOTOR REVERSED?)', () => {
   const s = new Sim(N);
   s.reversed = true;
   s.press('D');
   s.settle();
-  assert.ok(s.saw('WRONG DIRECTION'));
+  assert.ok(s.saw('MOTOR REVERSED?'));
   assert.ok(s.v > N - 0.3, `ran away to v=${s.v}`);
 });
 
 test('hold: after a shift, a pushed actuator is pulled back', () => {
   const s = new Sim(D);
   s.press('N');
-  assert.equal(s.settle(), 'Gear:N');
+  assert.equal(s.settle(), 'Gear: N');
   s.v += 0.2;
   s.run(1500);
   assert.ok(near(s.v, N), `v=${s.v}`);
-  assert.equal(s.settle(), 'Gear:N');
+  assert.equal(s.settle(), 'Gear: N');
 });
 
 test('hold is off after boot: a pushed actuator is NOT moved, gear follows reality', () => {
   const s = new Sim(D);
   s.v -= 0.3;
   s.run(1000);
-  assert.ok(s.saw('GEAR LOST'));
-  assert.equal(s.settle(), 'Gear:- NOHOLD');
+  assert.ok(s.saw('OUT OF GEAR'));
+  assert.equal(s.settle(), 'Gear: ?');
   assert.equal(s.drivenMs, 0);
 });
 
@@ -314,14 +318,14 @@ test('no movement on its own: 10 s in gear with sensor noise', () => {
   s.sensor = v => v + (Math.floor(t++ / 7) % 2 ? 0.03 : -0.03);
   s.run(10000);
   assert.equal(s.drivenMs, before);
-  assert.equal(s.settle(), 'Gear:N');
+  assert.equal(s.settle(), 'Gear: N');
 });
 
 test('pressing the current gear re-seats an off-centre actuator', () => {
   const s = new Sim(D + 0.13);
-  assert.equal(s.settle(), 'Gear:D NOHOLD');
+  assert.equal(s.settle(), 'Gear: D');
   s.press('D');
-  assert.equal(s.settle(), 'Gear:D');
+  assert.equal(s.settle(), 'Gear: D');
   assert.ok(near(s.v, D), `v=${s.v}`);
 });
 
@@ -329,7 +333,7 @@ test('limp mode: dead sensor, hold P + brake creeps toward P, max 3 s', () => {
   const s = new Sim(D);
   s.sensor = () => 0;
   s.run(600);
-  assert.equal(s.lcd.line(0), 'FLT POS SENSOR');
+  assert.equal(s.lcd.line(0), 'SENSOR FAULT');
 
   s.press('P', 500);                         // no brake
   s.run(200);
@@ -370,4 +374,17 @@ test('reset cause: reset button via Optiboot (EXTRF+WDRF) is not a watchdog', ()
   assert.match(new Sim(D, { mcusr: EXTRF | WDRF }).serial, /Reset cause: RESET BTN/);
   assert.match(new Sim(D, { mcusr: WDRF }).serial, /Reset cause: WATCHDOG/);
   assert.match(new Sim(D, { mcusr: PORF }).serial, /Reset cause: POWER ON/);
+});
+
+test('LCD: boot screen, voltage line, brake indicator and shift arrow', () => {
+  const s = new Sim(D);
+  assert.ok(s.lcdLog.includes('Start: POWER ON|WD:0 BO:0'), s.lcdLog.join('\n'));
+  s.settle();
+  assert.equal(s.lcd.line(1), '2.80V');
+  s.brake(true); s.run(400);
+  assert.equal(s.lcd.line(1), '2.80V BRAKE');
+  s.brake(false);
+  s.hold('N'); s.runUntil(() => s.v < 2.6, 2000); s.release('N');
+  assert.equal(s.lcd.line(0), 'D -> N');
+  assert.equal(s.settle(), 'Gear: N');
 });

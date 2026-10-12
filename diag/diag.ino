@@ -307,7 +307,7 @@ void checkCalibration(){
         Serial.println(F(" are TOO CLOSE together")); ok = false;
       }
   }
-  Serial.println(ok ? F("  -> OK, final_safe.ino will accept these.") : F("  -> FAIL, final_safe.ino will show FLT CALIBRATION."));
+  Serial.println(ok ? F("  -> OK, final_safe.ino will accept these.") : F("  -> FAIL, final_safe.ino will show BAD CALIBRATION."));
 }
 
 /**************** TESTS ****************/
