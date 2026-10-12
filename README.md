@@ -79,3 +79,6 @@ npm test
 
 The actuator model is crude (constant speed, no inertia, no electrical noise), so this
 checks the state machine only – it does not replace the bench tests above.
+
+Every pull request is checked automatically (`.github/workflows/ci.yml`): all sketches
+are compiled and this test is run.
