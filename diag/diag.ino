@@ -27,6 +27,10 @@
 #include <EEPROM.h>
 #include <avr/wdt.h>
 
+// Before any function: the builder puts its generated prototypes up here.
+enum Gear : uint8_t { G_NONE, G_P, G_R, G_N, G_D };
+enum { I_P, I_R, I_N, I_D, I_STOP, I_BRK, I_COUNT };
+
 /**************** RESET CAUSE CAPTURE ****************/
 uint8_t g_mcusr __attribute__((section(".noinit")));
 uint8_t g_r2    __attribute__((section(".noinit")));
@@ -43,7 +47,6 @@ const uint8_t PIN_ENA = 3, PIN_IN1 = 8, PIN_IN2 = 9;
 const uint8_t PIN_POS = A0;
 
 // inputs: index order matters for the interrupt code below
-enum { I_P, I_R, I_N, I_D, I_STOP, I_BRK, I_COUNT };
 const uint8_t inPins[I_COUNT]  = {4, 5, 6, 7, 2, 10};
 const char* const inNames[I_COUNT] = {"P", "R", "N", "D", "STOP", "BRK"};
 
@@ -64,7 +67,6 @@ const uint32_t      SPIKE_US      = 20000;   // active pulse shorter than this =
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);   // if blank, try 0x3F
 
-enum Gear : uint8_t { G_NONE, G_P, G_R, G_N, G_D };
 
 /**************** NOISE SPIKE COUNTING (pin-change interrupts) ****************/
 // Catches pulses far too short for the main loop to see.

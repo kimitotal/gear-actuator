@@ -44,6 +44,11 @@
 #include <EEPROM.h>
 #include <avr/wdt.h>
 
+// Declared before any function: the Arduino builder puts its generated
+// prototypes above the first function, and they need these types.
+enum Gear  : uint8_t { G_NONE, G_P, G_R, G_N, G_D };
+enum State : uint8_t { ST_IDLE, ST_MOVING, ST_FAULT };
+
 /**************** RESET CAUSE CAPTURE (runs before setup) ****************/
 // Optiboot clears MCUSR and passes it in r2; other bootloaders leave MCUSR.
 uint8_t g_mcusr __attribute__((section(".noinit")));
@@ -114,8 +119,6 @@ const unsigned long LCD_PERIOD_MS        = 250;
 const unsigned long MSG_MS               = 1500;
 
 /**************** TYPES / STATE ****************/
-enum Gear  : uint8_t { G_NONE, G_P, G_R, G_N, G_D };
-enum State : uint8_t { ST_IDLE, ST_MOVING, ST_FAULT };
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);   // if blank, try 0x3F
 

@@ -58,5 +58,6 @@ P or R without brake → `PRESS BRAKE`; push actuator off position → pulls bac
 ## Build
 
 Board: Arduino Uno / Nano (ATmega328P). Library: LiquidCrystal_I2C (0x27, try 0x3F).
-final_safe and diag have been edited since they were last compiled – run Verify first.
+Both new sketches compile for the Uno with arduino-cli 1.5.1 / arduino:avr 1.8.8, no
+warnings from the sketches (final_safe ≈ 14 KB, diag ≈ 16.5 KB flash).
 Not yet tested on hardware.
