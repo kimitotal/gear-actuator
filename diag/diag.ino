@@ -4,8 +4,6 @@
  *
  * Same wiring as final_safe.ino (incl. D2 = STOPPED, D10 = BRAKE).
  * The motor NEVER moves on its own – only on a serial command.
- * Relays mirror the gear the sensor sees (so the ECU stays consistent),
- * except during the relay test.
  *
  * LCD pages (rotate every 3 s; any input change jumps to page 1 for 5 s)
  *   1  2.803V G:D OK        position, detected gear, sensor range
@@ -17,7 +15,7 @@
  *
  * Serial monitor 115200 baud, send one letter:
  *   h help        s status stream on/off   p print status once
- *   r relay test  f jog forward            b jog backward
+ *   f jog forward  b jog backward
  *   c check calibration                    l reset log (from final_safe)
  *   x clear reset log                      z zero noise/Vcc counters
  *   w watchdog test (board must reboot once and show Rst:WATCHDOG)
@@ -43,8 +41,6 @@ void captureResetFlags(void){
 /**************** PINS (same as final_safe.ino) ****************/
 const uint8_t PIN_ENA = 3, PIN_IN1 = 8, PIN_IN2 = 9;
 const uint8_t PIN_POS = A0;
-const uint8_t REL_POS2 = A3, REL_P = 12, REL_R = A2, REL_POS3 = 11;
-const bool    RELAY_ACTIVE_LOW = true;
 
 // inputs: index order matters for the interrupt code below
 enum { I_P, I_R, I_N, I_D, I_STOP, I_BRK, I_COUNT };
@@ -65,7 +61,6 @@ const float DETECT_WIN_V = 0.15f;
 const int           JOG_PWM       = 120;
 const unsigned long JOG_MS        = 250;
 const uint32_t      SPIKE_US      = 20000;   // active pulse shorter than this = spike
-const bool          MIRROR_RELAYS = true;
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);   // if blank, try 0x3F
 
@@ -105,28 +100,6 @@ void readSpikes(uint16_t out[I_COUNT]){
 }
 
 bool act(uint8_t i){ return digitalRead(inPins[i]) == LOW; }
-
-/**************** RELAYS ****************/
-const uint8_t relayPins[4] = {REL_POS2, REL_P, REL_R, REL_POS3};
-uint8_t relayMask = 0;
-
-void relayWrite(uint8_t pin, bool on){ digitalWrite(pin, (on ^ RELAY_ACTIVE_LOW) ? HIGH : LOW); }
-
-uint8_t gearMask(Gear g){
-  switch (g){
-    case G_P: return 2;
-    case G_R: return 4;
-    case G_N: return 1 | 2 | 4;
-    case G_D: return 1 | 8 | 2;
-    default:  return 0;
-  }
-}
-void relaysShowGear(Gear g){
-  uint8_t m = gearMask(g);
-  for (uint8_t i = 0; i < 4; i++) if ((relayMask & (1 << i)) && !(m & (1 << i))) relayWrite(relayPins[i], false);
-  for (uint8_t i = 0; i < 4; i++) if (!(relayMask & (1 << i)) && (m & (1 << i))) relayWrite(relayPins[i], true);
-  relayMask = m;
-}
 
 /**************** MOTOR ****************/
 void motorBrake(){ digitalWrite(PIN_IN1, LOW); digitalWrite(PIN_IN2, LOW); analogWrite(PIN_ENA, 255); }
@@ -257,7 +230,6 @@ void updateLcd(unsigned long now, float v){
 void printHelp(){
   Serial.println(F("\n=== GEAR ACTUATOR DIAGNOSTICS ==="));
   Serial.println(F(" s status stream on/off   p status once"));
-  Serial.println(F(" r relay test (P,R,N,D,off – 2 s each)"));
   Serial.println(F(" f / b  jog motor forward / backward (short, slow)"));
   Serial.println(F(" c calibration check      l reset log"));
   Serial.println(F(" x clear reset log        z zero counters"));
@@ -337,22 +309,6 @@ void checkCalibration(){
 }
 
 /**************** TESTS ****************/
-void relayTest(){
-  Serial.println(F("Relay test – ECU should see each gear in turn:"));
-  const Gear seq[5] = {G_P, G_R, G_N, G_D, G_NONE};
-  for (uint8_t k = 0; k < 5; k++){
-    relaysShowGear(seq[k]);
-    uint8_t m = relayMask;
-    char l1[17];
-    snprintf(l1, sizeof l1, "%c 2:%d P%d R%d 3:%d", gearCh(seq[k]),
-             (m & 1) != 0, (m & 2) != 0, (m & 4) != 0, (m & 8) != 0);
-    lcd2("RELAY TEST", l1);
-    Serial.print(F("  ")); Serial.println(l1);
-    delay(2000);
-  }
-  Serial.println(F("Relay test done."));
-}
-
 void jog(bool fwd){
   float v0 = readPosV();
   if (!posInRange(v0)){ Serial.println(F("Jog refused: sensor out of range.")); return; }
@@ -406,7 +362,6 @@ void handleSerial(){
     case 'h': printHelp(); break;
     case 's': streaming = !streaming; Serial.println(streaming ? F("Stream ON") : F("Stream OFF")); break;
     case 'p': printStatus(); break;
-    case 'r': relayTest(); break;
     case 'f': jog(true); break;
     case 'b': jog(false); break;
     case 'c': checkCalibration(); break;
@@ -424,7 +379,6 @@ void setup(){
   digitalWrite(PIN_ENA, LOW);
   pinMode(PIN_ENA, OUTPUT); pinMode(PIN_IN1, OUTPUT); pinMode(PIN_IN2, OUTPUT);
   motorBrake();
-  for (uint8_t i = 0; i < 4; i++){ relayWrite(relayPins[i], false); pinMode(relayPins[i], OUTPUT); relayWrite(relayPins[i], false); }
 
   // inputs + pin-change interrupts
   for (uint8_t i = 0; i < I_COUNT; i++) pinMode(inPins[i], INPUT_PULLUP);
@@ -486,9 +440,6 @@ void loop(){
     vccNow = readVcc();
     if (vccNow < vccMin) vccMin = vccNow;
   }
-
-  // relays follow the real position (ECU stays consistent)
-  if (MIRROR_RELAYS) relaysShowGear(inR ? detectGear(v) : G_NONE);
 
   // any input change -> show live page
   uint8_t mask = 0;
