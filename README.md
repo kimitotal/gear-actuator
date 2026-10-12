@@ -22,20 +22,21 @@ boot, or noise on the button wires being read as presses.
 ## What final_safe.ino changes
 
 - No movement at power-up – adopts the gear the actuator is already in
-- P and R only when stopped; brake needed to leave P, select R, leave unknown position
+- Brake needed to select P or R, leave P, leave unknown position (no vehicle-speed input)
 - Real debounce, two-button press ignored
 - Watchdog, reset cause logged to EEPROM
 - Move timeout / stall / wrong-direction detection, gear re-detected after failures
 - Sensor valid window 0.20–4.80 V
 - Position hold with limited corrections
 - Motor rests in brake
+- Limp mode: in a fault, hold P or D + brake to creep the actuator blind toward that end (max 3 s per press)
+- Pressing the current gear again re-seats it if it sits off-centre
 
 ## New wiring for final_safe.ino
 
-- **D2** – vehicle stopped, LOW = stopped (ECU output "speed < 3 km/h" or optocoupler)
 - **D10** – brake, LOW = pressed (via optocoupler from brake-light switch, never 12 V directly)
 
-Both fail safe: a broken wire blocks P/R and leaving P.
+Fails safe: a broken wire blocks P/R and leaving P.
 
 ## Hardware to-do
 
@@ -54,7 +55,7 @@ Both fail safe: a broken wire blocks P/R and leaving P.
 5. `c` – calibration values accepted
 
 Then with final_safe.ino: pull sensor wire → `FLT POS SENSOR`; reset in D → stays D;
-R with D2 open → `NOT STOPPED`; push actuator off position → pulls back.
+P or R without brake → `PRESS BRAKE`; push actuator off position → pulls back.
 
 ## Build
 

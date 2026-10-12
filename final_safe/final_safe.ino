@@ -5,8 +5,8 @@
  *  - NO movement at power-up / reset. The sensor is read and the gear the
  *    actuator is ALREADY in is adopted. A reset while driving no longer
  *    sends the gearbox to P.
- *  - Interlocks: P and R only when the vehicle is stopped; brake needed to
- *    leave P, to select R and to leave an unknown position (except to N).
+ *  - Interlock: brake needed to select P or R, to leave P and to leave an
+ *    unknown position (except to N). No vehicle-speed input.
  *  - Real button debounce (must be stable LOW for 80 ms). Two buttons at
  *    the same time = ignored (wiring/noise fault).
  *  - Non-blocking state machine + 1 s watchdog. Reset cause (power-on,
@@ -14,23 +14,25 @@
  *  - Move timeout, stall and wrong-direction detection. After ANY failed
  *    move the gear is re-detected from the sensor (no stale currentGear).
  *  - Position sensor valid window 0.20–4.80 V (broken/shorted wire caught).
+ *    Must be out of range for 100 ms; meanwhile the motor is braked.
  *  - Position hold: if the actuator drifts off the selected gear it is pulled
  *    back (max 3 times / 10 s, then hold is disabled and ECU signal follows
  *    the real position).
+ *  - Limp mode: in a fault, hold P or D + brake to creep the actuator blind
+ *    toward that end (so the car can still be parked with a dead sensor).
  *  - Motor rests in brake (shorted) instead of free-wheeling.
- *  - LCD refreshed every 250 ms, not in the control loop.
+ *  - LCD refreshed every 250 ms, never while the motor is moving. If the
+ *    LCD/I2C bus hangs, the watchdog resets and the sketch runs without it.
  *
  * Pins (unchanged)
  *   L298N: ENA=3 (PWM), IN1=8, IN2=9      Position sensor: A0 (0..5 V)
  *   Buttons (INPUT_PULLUP): P=4 R=5 N=6 D=7
  *   ECU relays (LOW=ON): POS2=A3 P=12 R=A2 POS3=11
  *   LCD1602 I2C: SDA=A4 SCL=A5 (0x27)
- * NEW pins
- *   D2  = VEHICLE STOPPED, LOW = stopped (e.g. ECU output "speed < 3 km/h"
- *         pulling to GND, or via optocoupler). Open wire reads "moving".
+ * NEW pin
  *   D10 = BRAKE, LOW = pressed (via optocoupler from brake-light switch,
  *         NEVER 12 V directly). Open wire reads "not pressed".
- *   Both fail safe: a broken wire blocks P/R and leaving P.
+ *   Fails safe: a broken wire blocks P/R and leaving P.
  *
  * IMPORTANT: on an Arduino Nano with the "Old Bootloader", a watchdog reset
  * can cause an endless reboot loop. Use an Uno, or a Nano with the new
@@ -72,11 +74,10 @@ const uint8_t REL_R    = A2;
 const uint8_t REL_POS3 = 11;
 const bool    RELAY_ACTIVE_LOW = true;
 
-const uint8_t PIN_STOPPED = 2;   // LOW = vehicle stopped
 const uint8_t PIN_BRAKE   = 10;  // LOW = brake pressed
 
 /**************** SAFETY CONFIG ****************/
-const bool REQUIRE_STOPPED_FOR_P_R    = true;  // P and R only when stopped
+const bool REQUIRE_BRAKE_FOR_P         = true;
 const bool REQUIRE_BRAKE_TO_LEAVE_P   = true;
 const bool REQUIRE_BRAKE_FOR_R        = true;
 const bool REQUIRE_BRAKE_FROM_UNKNOWN = true;  // leaving "-" (except to N)
@@ -114,6 +115,7 @@ const unsigned long INPUT_STABLE_MS      = 30;
 const unsigned long DRIFT_CONFIRM_MS     = 200;
 const uint8_t       MAX_CORRECTIONS      = 3;
 const unsigned long CORRECTION_WINDOW_MS = 10000;
+const unsigned long SENSOR_FAULT_MS      = 100;    // out of range this long = fault
 const unsigned long SENSOR_RECOVER_MS    = 1000;
 const unsigned long LCD_PERIOD_MS        = 250;
 const unsigned long MSG_MS               = 1500;
@@ -160,7 +162,6 @@ DebouncedInput btnP      = {PIN_BTN_P,   BTN_STABLE_MS,   false, false, 0};
 DebouncedInput btnR      = {PIN_BTN_R,   BTN_STABLE_MS,   false, false, 0};
 DebouncedInput btnN      = {PIN_BTN_N,   BTN_STABLE_MS,   false, false, 0};
 DebouncedInput btnD      = {PIN_BTN_D,   BTN_STABLE_MS,   false, false, 0};
-DebouncedInput inStopped = {PIN_STOPPED, INPUT_STABLE_MS, false, false, 0};
 DebouncedInput inBrake   = {PIN_BRAKE,   INPUT_STABLE_MS, false, false, 0};
 
 /**************** MESSAGES ****************/
@@ -172,8 +173,10 @@ void showMsg(const char* t){
 }
 
 /**************** RELAYS ****************/
-const uint8_t RB_POS2 = 1, RB_P = 2, RB_R = 4, RB_POS3 = 8;   // bit order = relayPins[]
-const uint8_t relayPins[4] = {REL_POS2, REL_P, REL_R, REL_POS3};
+// Bit order = relayPins[] = switching order: POS2/POS3 come on first and go
+// off last, so the ECU never sees P or R alone in between (R alone = reverse).
+const uint8_t RB_POS2 = 1, RB_POS3 = 2, RB_P = 4, RB_R = 8;
+const uint8_t relayPins[4] = {REL_POS2, REL_POS3, REL_P, REL_R};
 uint8_t relayMask = 0;
 
 void relayWrite(uint8_t pin, bool on){
@@ -197,9 +200,9 @@ uint8_t gearMask(Gear g){
   }
 }
 
-// Only touches relays that change; turns OFF first, then ON.
+// Only touches relays that change; turns OFF first (R, P before POS), then ON.
 void applyRelayMask(uint8_t m){
-  for (uint8_t i = 0; i < 4; i++)
+  for (uint8_t i = 4; i-- > 0; )
     if ((relayMask & (1 << i)) && !(m & (1 << i))) relayWrite(relayPins[i], false);
   for (uint8_t i = 0; i < 4; i++)
     if (!(relayMask & (1 << i)) && (m & (1 << i))) relayWrite(relayPins[i], true);
@@ -269,7 +272,9 @@ unsigned long recoverSince = 0;
 
 void enterFault(const char* t){
   motorBrake();
-  if (state == ST_MOVING) currentGear = G_NONE;   // relays already OFF during travel
+  // Travelling with relays OFF = gear unknown. A small hold correction keeps
+  // its relays and its gear: the actuator never left the gear window.
+  if (state == ST_MOVING && relayMask == 0) currentGear = G_NONE;
   strncpy(faultText, t, 16); faultText[16] = 0;
   recovering = false;
   state = ST_FAULT;
@@ -292,6 +297,32 @@ void faultRecover(float v, unsigned long now){
   }
 }
 
+// Limp mode. In a fault there is no position feedback, so no gear can be
+// selected. To still be able to park: press and HOLD P or D with the brake
+// pressed and the actuator creeps blind toward that end of travel, for as
+// long as the button is held (max JOG_MAX_MS per press). Needs a fresh press,
+// so a shorted button wire cannot start it. ECU gets no gear signal.
+const unsigned long JOG_MAX_MS = 3000;
+
+bool faultJog(Gear req, unsigned long now){
+  static Gear jog = G_NONE;
+  static unsigned long jogStart = 0;
+  if (req == G_P || req == G_D){
+    if (inBrake.stable){
+      jog = req; jogStart = now;
+      currentGear = G_NONE;
+      relaysShowGear(G_NONE);
+      recovering = false;
+      showMsg(req == G_P ? "JOG -> P" : "JOG -> D");
+    } else showMsg("PRESS BRAKE");
+  } else if (req != G_NONE) showMsg("FAULT: NO SHIFT");
+
+  bool held = (jog == G_P) ? btnP.stable : (jog == G_D) ? btnD.stable : false;
+  if (!held || !inBrake.stable || now - jogStart >= JOG_MAX_MS){ jog = G_NONE; return false; }
+  motorDrive(PWM_SLOW, (jog == G_D) == (TARGET_D_V > TARGET_P_V));
+  return true;
+}
+
 /**************** MOVE (non-blocking) ****************/
 struct Move {
   Gear  target;
@@ -300,7 +331,8 @@ struct Move {
   unsigned long startT;
   bool  inZone;
   unsigned long inZoneSince;
-  float progressV;
+  float progressAdiff;       // distance to target at last real progress
+  bool  progressFwd;         // drive direction at that moment
   unsigned long progressT;
   float startAbsDiff;
 } mv;
@@ -316,9 +348,10 @@ void startMove(Gear g, bool correction, float v){
   mv.correction   = correction;
   mv.startT       = millis();
   mv.inZone       = false;
-  mv.progressV    = v;
   mv.progressT    = mv.startT;
   mv.startAbsDiff = fabs(mv.targetV - v);
+  mv.progressAdiff = mv.startAbsDiff;
+  mv.progressFwd   = mv.targetV > v;
   if (!correction) relaysShowGear(G_NONE);   // ECU sees no gear while travelling
   state = ST_MOVING;
 }
@@ -340,19 +373,14 @@ void endMove(bool success, const char* why, float v){
 }
 
 void runMove(float v, unsigned long now){
-  // interlock may change while travelling
-  if ((mv.target == G_P || mv.target == G_R) && REQUIRE_STOPPED_FOR_P_R && !inStopped.stable){
-    endMove(false, "ABORT: MOVING", v);
-    return;
-  }
-
   float diff  = mv.targetV - v;
   float adiff = fabs(diff);
+  bool  fwd   = diff > 0;                      // higher V = forward
 
   if (adiff <= TOL_V){
     motorBrake();
     if (!mv.inZone){ mv.inZone = true; mv.inZoneSince = now; }
-    mv.progressV = v; mv.progressT = now;
+    mv.progressAdiff = adiff; mv.progressFwd = fwd; mv.progressT = now;
     if (now - mv.inZoneSince >= DWELL_MS) endMove(true, "", v);
     return;
   }
@@ -361,10 +389,14 @@ void runMove(float v, unsigned long now){
   if (now - mv.startT > MOVE_TIMEOUT_MS)       { endMove(false, "MOVE TIMEOUT", v);    return; }
   if (adiff > mv.startAbsDiff + WRONG_DIR_V)   { endMove(false, "WRONG DIRECTION", v); return; }
 
-  if (fabs(v - mv.progressV) >= STALL_MIN_DV){ mv.progressV = v; mv.progressT = now; }
+  // Progress = getting CLOSER (or reversing after an overshoot). Sensor noise
+  // wobbling back and forth must not keep a stalled motor powered.
+  if (fwd != mv.progressFwd || mv.progressAdiff - adiff >= STALL_MIN_DV){
+    mv.progressAdiff = adiff; mv.progressFwd = fwd; mv.progressT = now;
+  }
   else if (now - mv.progressT > STALL_MS)      { endMove(false, "STALL", v);           return; }
 
-  motorDrive(adiff < SLOW_BAND_V ? PWM_SLOW : PWM_FAST, diff > 0);  // higher V = forward
+  motorDrive(adiff < SLOW_BAND_V ? PWM_SLOW : PWM_FAST, fwd);
 }
 
 /**************** POSITION HOLD ****************/
@@ -399,9 +431,8 @@ void holdMonitor(float v, unsigned long now){
 
 /**************** SHIFT REQUESTS ****************/
 const char* shiftBlockReason(Gear from, Gear to){
-  bool stopped = inStopped.stable;
   bool brake   = inBrake.stable;
-  if ((to == G_P || to == G_R) && REQUIRE_STOPPED_FOR_P_R && !stopped) return "NOT STOPPED";
+  if (to == G_P && REQUIRE_BRAKE_FOR_P && !brake)                      return "PRESS BRAKE";
   if (to == G_R && REQUIRE_BRAKE_FOR_R && !brake)                      return "PRESS BRAKE";
   if (from == G_P && REQUIRE_BRAKE_TO_LEAVE_P && !brake)               return "PRESS BRAKE";
   if (from == G_NONE && to != G_N && REQUIRE_BRAKE_FROM_UNKNOWN && !brake) return "PRESS BRAKE";
@@ -409,7 +440,8 @@ const char* shiftBlockReason(Gear from, Gear to){
 }
 
 void requestShift(Gear g, float v){
-  if (g == currentGear) return;
+  // same gear again = re-seat it, if it sits off-centre (e.g. after HOLD FAILED)
+  if (g == currentGear && fabs(v - targetVof(g)) <= HOLD_TOL_V) return;
   const char* why = shiftBlockReason(currentGear, g);
   if (why){ showMsg(why); return; }
   startMove(g, false, v);
@@ -437,10 +469,12 @@ uint8_t resetFlags(){
   return f;
 }
 
+// Several flags can be set at once. Optiboot leaves its bootloader through the
+// watchdog, so a reset button / upload arrives as EXTRF+WDRF: EXTRF must win.
 const char* resetName(uint8_t f){
-  if (f & _BV(WDRF))  return "WATCHDOG";
-  if (f & _BV(EXTRF)) return "RESET BTN";
   if (f & _BV(PORF))  return "POWER ON";
+  if (f & _BV(EXTRF)) return "RESET BTN";
+  if (f & _BV(WDRF))  return "WATCHDOG";
   if (f & _BV(BORF))  return "BROWNOUT";
   return "UNKNOWN";
 }
@@ -455,14 +489,20 @@ void logReset(uint8_t f){
   uint8_t idx = EEPROM.read(EE_IDX) % EE_LOG_N;
   EEPROM.update(EE_LOG + idx, f);
   EEPROM.update(EE_IDX, (idx + 1) % EE_LOG_N);
-  if      (f & _BV(WDRF))  bump(EE_CNT_WDT);
+  if      (f & _BV(PORF))  bump(EE_CNT_PWR);   // same priority as resetName()
   else if (f & _BV(EXTRF)) bump(EE_CNT_EXT);
-  else if (f & _BV(PORF))  bump(EE_CNT_PWR);
+  else if (f & _BV(WDRF))  bump(EE_CNT_WDT);
   else if (f & _BV(BORF))  bump(EE_CNT_BOR);
 }
 
 /**************** LCD ****************/
 unsigned long lastLcd = 0;
+
+// Set while talking to the LCD. If the watchdog fires in there (stuck I2C
+// bus), the next boot sees it and runs without the display until power-off.
+uint16_t g_lcdBusy __attribute__((section(".noinit")));
+const uint16_t LCD_BUSY_MAGIC = 0xA55A;
+bool lcdOk = true;
 
 void lcdLine(uint8_t row, const char* s){
   char buf[17]; uint8_t i = 0;
@@ -474,23 +514,21 @@ void lcdLine(uint8_t row, const char* s){
 }
 
 void updateLcd(float v, unsigned long now){
+  if (!lcdOk) return;
   char l0[17], l1[17], vs[8];
   if (msgText[0] && now - msgAt < MSG_MS)
     snprintf(l0, sizeof l0, "%s", msgText);
   else if (state == ST_FAULT)
     snprintf(l0, sizeof l0, "FLT %s", faultText);
-  else if (state == ST_MOVING)
-    snprintf(l0, sizeof l0, "Gear:%c -> %c%s", gearCh(currentGear), gearCh(mv.target),
-             mv.correction ? " HLD" : "");
   else
     snprintf(l0, sizeof l0, "Gear:%c%s", gearCh(currentGear), holdSuspended ? " NOHOLD" : "");
 
   dtostrf(v, 5, 3, vs);
-  snprintf(l1, sizeof l1, "%sV %s %s", vs,
-           inBrake.stable ? "BRK" : "---",
-           inStopped.stable ? "STOP" : "MOVE");
+  snprintf(l1, sizeof l1, "%sV %s", vs, inBrake.stable ? "BRK" : "---");
+  g_lcdBusy = LCD_BUSY_MAGIC;
   lcdLine(0, l0);
   lcdLine(1, l1);
+  g_lcdBusy = 0;
 }
 
 /**************** SETUP ****************/
@@ -507,7 +545,7 @@ void setup(){
   // 2) Inputs
   pinMode(PIN_POS, INPUT);
   btnP.begin(); btnR.begin(); btnN.begin(); btnD.begin();
-  inStopped.begin(); inBrake.begin();
+  inBrake.begin();
 
   // 3) Adopt the gear the actuator is ALREADY in – never move at boot
   calOk = checkCalibration();
@@ -533,21 +571,30 @@ void setup(){
   Serial.print(F("Boot gear: ")); Serial.print(gearCh(currentGear));
   Serial.print(F("  V=")); Serial.println(v, 3);
 
-  // 5) LCD (I2C timeout so a noisy bus can't hang the program)
-  Wire.begin();
+  // 5) LCD. Watchdog is already on (4 s: lcd.init() alone blocks ~1.1 s), so
+  //    a stuck I2C bus resets instead of hanging; the boot after that skips
+  //    the LCD and the gearbox stays controllable.
+  wdt_enable(WDTO_4S);
+  lcdOk = (g_lcdBusy != LCD_BUSY_MAGIC);
+  if (lcdOk){
+    g_lcdBusy = LCD_BUSY_MAGIC;
+    Wire.begin();
 #if defined(WIRE_HAS_TIMEOUT)
-  Wire.setWireTimeout(3000, true);
+    Wire.setWireTimeout(3000, true);
 #endif
-  lcd.init();
-  lcd.backlight();
-  char l0[17], l1[17];
-  snprintf(l0, sizeof l0, "RST:%s", resetName(rf));
-  snprintf(l1, sizeof l1, "B%uW%uE%uP%u",   // fits 16 chars even at 255
-           EEPROM.read(EE_CNT_BOR), EEPROM.read(EE_CNT_WDT),
-           EEPROM.read(EE_CNT_EXT), EEPROM.read(EE_CNT_PWR));
-  lcdLine(0, l0);
-  lcdLine(1, l1);
-  delay(1500);
+    lcd.init();
+    lcd.backlight();
+    char l0[17], l1[17];
+    snprintf(l0, sizeof l0, "RST:%s", resetName(rf));
+    snprintf(l1, sizeof l1, "B%uW%uE%uP%u",   // fits 16 chars even at 255
+             EEPROM.read(EE_CNT_BOR), EEPROM.read(EE_CNT_WDT),
+             EEPROM.read(EE_CNT_EXT), EEPROM.read(EE_CNT_PWR));
+    lcdLine(0, l0);
+    lcdLine(1, l1);
+    g_lcdBusy = 0;
+    wdt_reset();
+    delay(1500);
+  } else Serial.println(F("LCD skipped: it hung last time (power-cycle to retry)"));
 
   wdt_enable(WDTO_1S);
 }
@@ -558,13 +605,16 @@ void loop(){
   unsigned long now = millis();
   float v = readPosV();
 
-  inStopped.update(now);
   inBrake.update(now);
   Gear req = readButtons(now);
 
-  if (state != ST_FAULT && !posInRange(v)) enterFault("POS SENSOR");
+  static unsigned long posOkAt = 0;
+  bool posOk = posInRange(v);
+  if (posOk) posOkAt = now;
+  else if (state != ST_FAULT && now - posOkAt >= SENSOR_FAULT_MS) enterFault("POS SENSOR");
 
-  switch (state){
+  if (!posOk && state != ST_FAULT) motorBrake();   // unconfirmed glitch: don't act on a bad reading
+  else switch (state){
     case ST_IDLE:
       if (req != G_NONE) requestShift(req, v);
       else               holdMonitor(v, now);
@@ -573,12 +623,12 @@ void loop(){
       runMove(v, now);                 // presses while travelling are ignored
       break;
     case ST_FAULT:
-      faultRecover(v, now);
-      if (req != G_NONE) showMsg("FAULT: NO SHIFT");
+      if (!faultJog(req, now)) faultRecover(v, now);   // faultRecover brakes the motor
       break;
   }
 
-  if (now - lastLcd >= LCD_PERIOD_MS){
+  // ~50 ms of blocking I2C: never while the motor is being driven
+  if (state != ST_MOVING && now - lastLcd >= LCD_PERIOD_MS){
     lastLcd = now;
     updateLcd(v, now);
   }
