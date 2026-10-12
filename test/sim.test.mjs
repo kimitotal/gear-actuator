@@ -300,14 +300,6 @@ test('hold: after a shift, a pushed actuator is pulled back', () => {
   assert.equal(s.settle(), 'Gear: N');
 });
 
-test('hold is off after boot: a pushed actuator is NOT moved, gear follows reality', () => {
-  const s = new Sim(D);
-  s.v -= 0.3;
-  s.run(1000);
-  assert.ok(s.saw('OUT OF GEAR'));
-  assert.equal(s.settle(), 'Gear: ?');
-  assert.equal(s.drivenMs, 0);
-});
 
 test('no movement on its own: 10 s in gear with sensor noise', () => {
   const s = new Sim(D);
@@ -321,13 +313,6 @@ test('no movement on its own: 10 s in gear with sensor noise', () => {
   assert.equal(s.settle(), 'Gear: N');
 });
 
-test('pressing the current gear re-seats an off-centre actuator', () => {
-  const s = new Sim(D + 0.13);
-  assert.equal(s.settle(), 'Gear: D');
-  s.press('D');
-  assert.equal(s.settle(), 'Gear: D');
-  assert.ok(near(s.v, D), `v=${s.v}`);
-});
 
 test('limp mode: dead sensor, hold P + brake creeps toward P, max 3 s', () => {
   const s = new Sim(D);
@@ -390,4 +375,49 @@ test('LCD: boot screen, voltage line, brake indicator and shift arrow', () => {
   s.hold('N'); s.runUntil(() => s.v < 2.6, 2000); s.release('N');
   assert.equal(s.lcd.line(0), 'D -> N');
   assert.equal(s.settle(), 'Gear: N');
+});
+
+test('hold is on after boot: a pushed actuator is pulled back', () => {
+  const s = new Sim(D);
+  assert.equal(s.settle(), 'Gear: D');
+  assert.equal(s.drivenMs, 0);
+  s.v -= 0.3;
+  s.run(1500);
+  assert.ok(near(s.v, D), `v=${s.v}`);
+  assert.equal(s.settle(), 'Gear: D');
+});
+
+test('boot slightly off-centre: hold re-centres it within the gear', () => {
+  const s = new Sim(D + 0.13);
+  s.run(1000);
+  assert.ok(near(s.v, D), `v=${s.v}`);
+  assert.equal(s.settle(), 'Gear: D');
+});
+
+// After a sensor fault has cleared, hold stays off until the driver shifts.
+function afterSensorFault() {
+  const s = new Sim(D);
+  s.sensor = () => 0; s.run(300); s.sensor = v => v;
+  s.run(1500);
+  assert.equal(s.settle(), 'Gear: D');
+  return s;
+}
+
+test('hold suspended: a pushed actuator is NOT moved, gear follows reality', () => {
+  const s = afterSensorFault();
+  s.v -= 0.3;
+  s.run(1000);
+  assert.ok(s.saw('OUT OF GEAR'));
+  assert.equal(s.settle(), 'Gear: ?');
+  assert.equal(s.drivenMs, 0);
+});
+
+test('hold suspended: pressing the current gear re-seats an off-centre actuator', () => {
+  const s = afterSensorFault();
+  s.v += 0.13;
+  s.run(1000);
+  assert.equal(s.drivenMs, 0);
+  s.press('D');
+  assert.equal(s.settle(), 'Gear: D');
+  assert.ok(near(s.v, D), `v=${s.v}`);
 });

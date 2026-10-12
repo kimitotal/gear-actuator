@@ -20,7 +20,7 @@ boot, or noise on the button wires being read as presses.
 
 ## What final_safe.ino changes
 
-- No movement at power-up – adopts the gear the actuator is already in
+- No shift at power-up – adopts the gear the actuator is already in (position hold may re-centre it inside that gear)
 - Brake needed to select P or R, leave P, leave unknown position (no vehicle-speed input)
 - Real debounce, two-button press ignored
 - Watchdog, reset cause logged to EEPROM
