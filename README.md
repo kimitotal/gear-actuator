@@ -53,7 +53,7 @@ Fails safe: a broken wire blocks P/R and leaving P.
 
 The gear voltages are typed in ONE place: `final_safe.ino`. It saves them to EEPROM each
 time it starts and `diag.ino` reads them from there, so flash `final_safe.ino` and let it
-start once (it does not move the actuator) before using `diag.ino`.
+start once (it does not shift gear; position hold may re-centre the actuator) before using `diag.ino`.
 
 1. `z`, then engine on, fans/lights/wipers on, don't touch buttons – spikes must stay 0, Vcc min ≳ 4.7 V
 2. `f` / `b` – motor direction OK (forward = voltage up)
