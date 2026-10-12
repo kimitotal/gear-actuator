@@ -1,0 +1,11 @@
+{
+  "name": "gear-actuator-sim",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test sim.test.mjs"
+  },
+  "dependencies": {
+    "avr8js": "^0.21.1"
+  }
+}

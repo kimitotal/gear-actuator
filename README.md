@@ -61,3 +61,19 @@ Board: Arduino Uno / Nano (ATmega328P). Library: LiquidCrystal_I2C (0x27, try 0x
 Both new sketches compile for the Uno with arduino-cli 1.5.1 / arduino:avr 1.8.8, no
 warnings from the sketches (final_safe ≈ 14 KB, diag ≈ 16.5 KB flash).
 Not yet tested on hardware.
+
+## Logic test (no hardware)
+
+`test/sim.test.mjs` runs the compiled `final_safe.ino` in an ATmega328P simulator
+(avr8js) against a simple actuator model and checks 21 scenarios: interlocks, button
+noise, sensor glitch / fault / recovery, stall, wrong direction, hold, limp mode, reset
+cause. Needs Node.js and `arduino-cli`.
+
+```
+cd test
+npm install
+npm test
+```
+
+The actuator model is crude (constant speed, no inertia, no electrical noise), so this
+checks the state machine only – it does not replace the bench tests above.

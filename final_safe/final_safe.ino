@@ -169,13 +169,16 @@ void showMsg(const char* t){
 }
 
 /**************** MOTOR ****************/
+bool motorOn = false;   // true while the motor is being driven
 // Brake: both low-side switches on -> motor shorted, resists back-driving.
 void motorBrake(){
+  motorOn = false;
   digitalWrite(PIN_IN1, LOW);
   digitalWrite(PIN_IN2, LOW);
   analogWrite(PIN_ENA, 255);
 }
 void motorDrive(int pwm, bool forward){
+  motorOn = true;
   pwm = constrain(pwm, 0, 255);
   digitalWrite(PIN_IN1, forward ? HIGH : LOW);
   digitalWrite(PIN_IN2, forward ? LOW  : HIGH);
@@ -283,7 +286,8 @@ bool faultJog(Gear req, unsigned long now){
     } else showMsg("PRESS BRAKE");
   } else if (req != G_NONE) showMsg("FAULT: NO SHIFT");
 
-  bool held = (jog == G_P) ? btnP.stable : (jog == G_D) ? btnD.stable : false;
+  // raw pin, not debounced: letting go must stop the motor at once
+  bool held = (jog == G_P) ? btnP.lastRaw : (jog == G_D) ? btnD.lastRaw : false;
   if (!held || !inBrake.stable || now - jogStart >= JOG_MAX_MS){ jog = G_NONE; return false; }
   motorDrive(PWM_SLOW, (jog == G_D) == (TARGET_D_V > TARGET_P_V));
   return true;
@@ -402,7 +406,8 @@ Gear readButtons(unsigned long now){
   bool eN = btnN.update(now);
   bool eD = btnD.update(now);
   if (!(eP || eR || eN || eD)) return G_NONE;
-  uint8_t held = btnP.stable + btnR.stable + btnN.stable + btnD.stable;
+  // raw, not debounced: a second button that is only just going down counts too
+  uint8_t held = btnP.lastRaw + btnR.lastRaw + btnN.lastRaw + btnD.lastRaw;
   if (held > 1){ showMsg("BUTTON FAULT"); return G_NONE; }
   return eP ? G_P : eR ? G_R : eN ? G_N : G_D;
 }
@@ -574,7 +579,7 @@ void loop(){
   }
 
   // ~50 ms of blocking I2C: never while the motor is being driven
-  if (state != ST_MOVING && now - lastLcd >= LCD_PERIOD_MS){
+  if (state != ST_MOVING && !motorOn && now - lastLcd >= LCD_PERIOD_MS){
     lastLcd = now;
     updateLcd(v, now);
   }
