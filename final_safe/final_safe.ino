@@ -16,8 +16,8 @@
  *  - Position sensor valid window 0.20–4.80 V (broken/shorted wire caught).
  *    Must be out of range for 100 ms; meanwhile the motor is braked.
  *  - Position hold: if the actuator drifts off the selected gear it is pulled
- *    back (max 3 times / 10 s, then hold is disabled and ECU signal follows
- *    the real position).
+ *    back (max 3 times / 10 s, then hold is disabled and the shown gear
+ *    follows the real position).
  *  - Limp mode: in a fault, hold P or D + brake to creep the actuator blind
  *    toward that end (so the car can still be parked with a dead sensor).
  *  - Motor rests in brake (shorted) instead of free-wheeling.
@@ -27,7 +27,6 @@
  * Pins (unchanged)
  *   L298N: ENA=3 (PWM), IN1=8, IN2=9      Position sensor: A0 (0..5 V)
  *   Buttons (INPUT_PULLUP): P=4 R=5 N=6 D=7
- *   ECU relays (LOW=ON): POS2=A3 P=12 R=A2 POS3=11
  *   LCD1602 I2C: SDA=A4 SCL=A5 (0x27)
  * NEW pin
  *   D10 = BRAKE, LOW = pressed (via optocoupler from brake-light switch,
@@ -67,12 +66,6 @@ const uint8_t PIN_BTN_P = 4;
 const uint8_t PIN_BTN_R = 5;
 const uint8_t PIN_BTN_N = 6;
 const uint8_t PIN_BTN_D = 7;
-
-const uint8_t REL_POS2 = A3;
-const uint8_t REL_P    = 12;
-const uint8_t REL_R    = A2;
-const uint8_t REL_POS3 = 11;
-const bool    RELAY_ACTIVE_LOW = true;
 
 const uint8_t PIN_BRAKE   = 10;  // LOW = brake pressed
 
@@ -172,44 +165,6 @@ void showMsg(const char* t){
   msgAt = millis();
 }
 
-/**************** RELAYS ****************/
-// Bit order = relayPins[] = switching order: POS2/POS3 come on first and go
-// off last, so the ECU never sees P or R alone in between (R alone = reverse).
-const uint8_t RB_POS2 = 1, RB_POS3 = 2, RB_P = 4, RB_R = 8;
-const uint8_t relayPins[4] = {REL_POS2, REL_POS3, REL_P, REL_R};
-uint8_t relayMask = 0;
-
-void relayWrite(uint8_t pin, bool on){
-  digitalWrite(pin, (on ^ RELAY_ACTIVE_LOW) ? HIGH : LOW);
-}
-
-void safeInitRelayPin(uint8_t pin){
-  relayWrite(pin, false);   // set level while still INPUT
-  pinMode(pin, OUTPUT);
-  relayWrite(pin, false);
-}
-
-// ECU map: P=P  R=R  N=POS2+P+R  D=POS2+POS3+P
-uint8_t gearMask(Gear g){
-  switch (g){
-    case G_P: return RB_P;
-    case G_R: return RB_R;
-    case G_N: return RB_POS2 | RB_P | RB_R;
-    case G_D: return RB_POS2 | RB_POS3 | RB_P;
-    default:  return 0;
-  }
-}
-
-// Only touches relays that change; turns OFF first (R, P before POS), then ON.
-void applyRelayMask(uint8_t m){
-  for (uint8_t i = 4; i-- > 0; )
-    if ((relayMask & (1 << i)) && !(m & (1 << i))) relayWrite(relayPins[i], false);
-  for (uint8_t i = 0; i < 4; i++)
-    if (!(relayMask & (1 << i)) && (m & (1 << i))) relayWrite(relayPins[i], true);
-  relayMask = m;
-}
-void relaysShowGear(Gear g){ applyRelayMask(gearMask(g)); }
-
 /**************** MOTOR ****************/
 // Brake: both low-side switches on -> motor shorted, resists back-driving.
 void motorBrake(){
@@ -266,20 +221,30 @@ bool checkCalibration(){
   return true;
 }
 
+struct Move {
+  Gear  target;
+  float targetV;
+  bool  correction;          // true = hold correction
+  unsigned long startT;
+  bool  inZone;
+  unsigned long inZoneSince;
+  float progressAdiff;       // distance to target at last real progress
+  bool  progressFwd;         // drive direction at that moment
+  unsigned long progressT;
+  float startAbsDiff;
+} mv;
+
 /**************** FAULTS ****************/
 bool recovering = false;
 unsigned long recoverSince = 0;
 
 void enterFault(const char* t){
   motorBrake();
-  // Travelling with relays OFF = gear unknown. A small hold correction keeps
-  // its relays and its gear: the actuator never left the gear window.
-  if (state == ST_MOVING && relayMask == 0) currentGear = G_NONE;
+  // Mid-shift = gear unknown. A hold correction keeps its gear.
+  if (state == ST_MOVING && !mv.correction) currentGear = G_NONE;
   strncpy(faultText, t, 16); faultText[16] = 0;
   recovering = false;
   state = ST_FAULT;
-  // Relays are left as they are: the motor is braked, so the actuator
-  // (and therefore the real gear) has not moved.
 }
 
 void faultRecover(float v, unsigned long now){
@@ -290,7 +255,6 @@ void faultRecover(float v, unsigned long now){
   if (now - recoverSince >= SENSOR_RECOVER_MS){
     recovering    = false;
     currentGear   = detectGear(v);
-    relaysShowGear(currentGear);
     holdSuspended = true;
     state = ST_IDLE;
     showMsg("SENSOR OK");
@@ -301,7 +265,7 @@ void faultRecover(float v, unsigned long now){
 // selected. To still be able to park: press and HOLD P or D with the brake
 // pressed and the actuator creeps blind toward that end of travel, for as
 // long as the button is held (max JOG_MAX_MS per press). Needs a fresh press,
-// so a shorted button wire cannot start it. ECU gets no gear signal.
+// so a shorted button wire cannot start it.
 const unsigned long JOG_MAX_MS = 3000;
 
 bool faultJog(Gear req, unsigned long now){
@@ -311,7 +275,6 @@ bool faultJog(Gear req, unsigned long now){
     if (inBrake.stable){
       jog = req; jogStart = now;
       currentGear = G_NONE;
-      relaysShowGear(G_NONE);
       recovering = false;
       showMsg(req == G_P ? "JOG -> P" : "JOG -> D");
     } else showMsg("PRESS BRAKE");
@@ -324,18 +287,6 @@ bool faultJog(Gear req, unsigned long now){
 }
 
 /**************** MOVE (non-blocking) ****************/
-struct Move {
-  Gear  target;
-  float targetV;
-  bool  correction;          // true = hold correction, relays kept
-  unsigned long startT;
-  bool  inZone;
-  unsigned long inZoneSince;
-  float progressAdiff;       // distance to target at last real progress
-  bool  progressFwd;         // drive direction at that moment
-  unsigned long progressT;
-  float startAbsDiff;
-} mv;
 
 bool drifting = false;
 unsigned long driftSince = 0;
@@ -352,7 +303,6 @@ void startMove(Gear g, bool correction, float v){
   mv.startAbsDiff = fabs(mv.targetV - v);
   mv.progressAdiff = mv.startAbsDiff;
   mv.progressFwd   = mv.targetV > v;
-  if (!correction) relaysShowGear(G_NONE);   // ECU sees no gear while travelling
   state = ST_MOVING;
 }
 
@@ -360,11 +310,9 @@ void endMove(bool success, const char* why, float v){
   motorBrake();
   if (success){
     currentGear = mv.target;
-    relaysShowGear(currentGear);
     if (!mv.correction){ holdSuspended = false; correctionCount = 0; }
   } else {
     currentGear = detectGear(v);              // trust the sensor, not memory
-    relaysShowGear(currentGear);
     holdSuspended = true;                     // no automatic moves after a failure
     showMsg(why);
   }
@@ -409,10 +357,9 @@ void holdMonitor(float v, unsigned long now){
   drifting = false;
 
   if (!ENABLE_POSITION_HOLD || holdSuspended){
-    // not allowed to move: at least make the ECU signal match reality
+    // not allowed to move: at least make the shown gear match reality
     if (err > DETECT_WIN_V){
       currentGear = detectGear(v);
-      relaysShowGear(currentGear);
       showMsg("GEAR LOST");
     }
     return;
@@ -422,10 +369,9 @@ void holdMonitor(float v, unsigned long now){
   if (++correctionCount > MAX_CORRECTIONS){
     holdSuspended = true;
     showMsg("HOLD FAILED");
-    if (err > DETECT_WIN_V){ currentGear = detectGear(v); relaysShowGear(currentGear); }
+    if (err > DETECT_WIN_V) currentGear = detectGear(v);
     return;
   }
-  if (err > DETECT_WIN_V) relaysShowGear(G_NONE);  // actuator left the gear
   startMove(currentGear, true, v);
 }
 
@@ -539,8 +485,6 @@ void setup(){
   pinMode(PIN_IN1, OUTPUT);
   pinMode(PIN_IN2, OUTPUT);
   motorBrake();
-  for (uint8_t i = 0; i < 4; i++) safeInitRelayPin(relayPins[i]);
-  relayMask = 0;
 
   // 2) Inputs
   pinMode(PIN_POS, INPUT);
@@ -554,7 +498,6 @@ void setup(){
   else if (!posInRange(v))   enterFault("POS SENSOR");
   else {
     currentGear = detectGear(v);
-    relaysShowGear(currentGear);
   }
   holdSuspended = true;
 
