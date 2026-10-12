@@ -7,9 +7,8 @@ sensor on A0 closes the loop.
 
 | File | Purpose |
 |---|---|
-| `kalibracija/kalibracija.ino` | Jog the actuator with D/N buttons and read the voltage for each gear |
 | `final_safe/final_safe.ino` | Hardened version – use this one |
-| `diag/diag.ino` | Bench / parked diagnostics (live inputs, noise, Vcc, reset log, motor tests) |
+| `diag/diag.ino` | Bench / parked diagnostics (live inputs, noise, Vcc, reset and event log, motor tests) and calibration mode for finding the gear voltages |
 
 ## Known problem with the original
 
@@ -51,6 +50,16 @@ Fails safe: a broken wire blocks P/R and leaving P.
 - Nano with "Old Bootloader": flash the new bootloader (watchdog reboot loop)
 - Keep electronics away from gearbox / exhaust heat
 
+## Calibration (diag.ino, serial 115200)
+
+1. Send `k` – calibration mode on. The LCD shows the live voltage.
+2. Hold **D** to move the actuator forward (voltage up) or **N** to move it back, until a gear is engaged.
+3. Send `1`, `2`, `3` or `4` to store that voltage as P, R, N or D. Repeat for all four gears.
+4. Send `k` again – it prints four `const float TARGET_..._V` lines. Paste them into `final_safe.ino`.
+
+The buttons move the motor only while calibration mode is on, and it stops 0.3 V before
+the sensor limits.
+
 ## Bench tests (use diag.ino, serial 115200, send `h`)
 
 The gear voltages are typed in ONE place: `final_safe.ino`. It saves them to EEPROM each
@@ -75,7 +84,7 @@ Not yet tested on hardware.
 ## Logic test (no hardware)
 
 `test/sim.test.mjs` runs the compiled `final_safe.ino` in an ATmega328P simulator
-(avr8js) against a simple actuator model and checks 35 scenarios (two of them run `diag.ino` too): interlocks, button
+(avr8js) against a simple actuator model and checks 37 scenarios (four of them run `diag.ino` too): interlocks, button
 noise, sensor glitch / fault / recovery, stall, wrong direction, hold, limp mode, reset
 cause, overshoot from actuator inertia. Needs Node.js and `arduino-cli`.
 

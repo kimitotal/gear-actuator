@@ -88,7 +88,7 @@ const float POS_MIN_V_OK = 0.20f;   // below = broken wire / short to GND
 const float POS_MAX_V_OK = 4.80f;   // above = short to 5 V
 
 // ***************************************************************
-// Paste values from kalibracija.ino here
+// Paste the values from diag.ino here (its calibration mode, command k)
 const float TARGET_P_V = 0.60f;
 const float TARGET_R_V = 1.20f;
 const float TARGET_N_V = 2.00f;
