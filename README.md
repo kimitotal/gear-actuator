@@ -20,7 +20,7 @@ boot, or noise on the button wires being read as presses.
 
 ## What final_safe.ino changes
 
-- No movement at power-up – adopts the gear the actuator is already in
+- No shift at power-up – adopts the gear the actuator is already in (position hold may re-centre it inside that gear)
 - Brake needed to select P or R, leave P, leave unknown position (no vehicle-speed input)
 - Real debounce, two-button press ignored
 - Watchdog, reset cause logged to EEPROM
@@ -65,7 +65,7 @@ Not yet tested on hardware.
 ## Logic test (no hardware)
 
 `test/sim.test.mjs` runs the compiled `final_safe.ino` in an ATmega328P simulator
-(avr8js) against a simple actuator model and checks 22 scenarios: interlocks, button
+(avr8js) against a simple actuator model and checks 24 scenarios: interlocks, button
 noise, sensor glitch / fault / recovery, stall, wrong direction, hold, limp mode, reset
 cause. Needs Node.js and `arduino-cli`.
 

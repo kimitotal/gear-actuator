@@ -2,9 +2,10 @@
  * Gear actuator with ANALOG position feedback – SAFE version
  *
  * What changed vs. final.ino
- *  - NO movement at power-up / reset. The sensor is read and the gear the
+ *  - NO shift at power-up / reset. The sensor is read and the gear the
  *    actuator is ALREADY in is adopted. A reset while driving no longer
- *    sends the gearbox to P.
+ *    sends the gearbox to P. Position hold is active from boot, so it may
+ *    re-centre the actuator inside that gear (at most 0.15 V).
  *  - Interlock: brake needed to select P or R, to leave P and to leave an
  *    unknown position (except to N). No vehicle-speed input.
  *  - Real button debounce (must be stable LOW for 80 ms). Two buttons at
@@ -126,7 +127,7 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);   // if blank, try 0x3F
 State state       = ST_IDLE;
 Gear  currentGear = G_NONE;
 bool  calOk       = true;
-bool  holdSuspended = true;           // hold starts after first driver shift
+bool  holdSuspended = true;           // set in setup(); true = no automatic moves  
 char  faultText[17] = "";
 
 /**************** DEBOUNCED INPUT ****************/
@@ -522,7 +523,7 @@ void setup(){
   else {
     currentGear = detectGear(v);
   }
-  holdSuspended = true;
+  holdSuspended = (currentGear == G_NONE);   // hold from boot, if the gear is known
 
   // 4) Reset diagnostics
   uint8_t rf = resetFlags();
