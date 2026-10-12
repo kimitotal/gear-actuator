@@ -27,10 +27,14 @@ const P = 0.6, R = 1.2, N = 2.0, D = 2.8;          // TARGET_*_V in the sketch
 const BTN = { P: 4, R: 5, N: 6, D: 7 };            // port D pins
 const PORF = 1, EXTRF = 2, WDRF = 8;
 
-execFileSync(process.env.ARDUINO_CLI || 'arduino-cli',
-  ['compile', '-b', 'arduino:avr:uno', '--output-dir', join(HERE, 'build'), join(HERE, '..', 'final_safe')],
-  { stdio: 'ignore' });
-const program = loadHex(readFileSync(join(HERE, 'build', 'final_safe.ino.hex'), 'ascii'));
+function build(sketch) {
+  const out = join(HERE, 'build', sketch);
+  execFileSync(process.env.ARDUINO_CLI || 'arduino-cli',
+    ['compile', '-b', 'arduino:avr:uno', '--output-dir', out, join(HERE, '..', sketch)], { stdio: 'ignore' });
+  return loadHex(readFileSync(join(out, sketch + '.ino.hex'), 'ascii'));
+}
+const program = build('final_safe');
+const diagProgram = build('diag');
 
 function loadHex(text) {
   const bytes = new Uint8Array(0x8000);
@@ -67,7 +71,7 @@ class Lcd {
 
 class Sim {
   // startV: where the actuator sits at power-up. mcusr: reset flags the chip reports.
-  constructor(startV, { mcusr = PORF, lcdPresent = true, eeprom = new EEPROMMemoryBackend(1024) } = {}) {
+  constructor(startV, { mcusr = PORF, lcdPresent = true, eeprom = new EEPROMMemoryBackend(1024), hex = program } = {}) {
     this.v = startV;
     this.sensor = v => v;        // override to fake a broken / glitching sensor wire
     this.blocked = false;        // actuator mechanically jammed
@@ -77,14 +81,15 @@ class Sim {
     this.lcd = new Lcd();
     this.lcdLog = [];
 
-    const cpu = this.cpu = new CPU(program);
+    const cpu = this.cpu = new CPU(hex);
     cpu.data[0x54] = mcusr;
     this.portB = new AVRIOPort(cpu, portBConfig);
     new AVRIOPort(cpu, portCConfig);
     this.portD = new AVRIOPort(cpu, portDConfig);
     new AVRTimer(cpu, timer0Config); new AVRTimer(cpu, timer1Config); new AVRTimer(cpu, timer2Config);
     this.adc = new AVRADC(cpu, adcConfig);
-    new AVRUSART(cpu, usart0Config, F_CPU).onByteTransmit = b => { this.serial += String.fromCharCode(b); };
+    this.usart = new AVRUSART(cpu, usart0Config, F_CPU);
+    this.usart.onByteTransmit = b => { this.serial += String.fromCharCode(b); };
     this.eeprom = eeprom;        // pass it to the next Sim to keep the EEPROM across a "power cycle"
     new AVREEPROM(cpu, eeprom);
     new AVRWatchdog(cpu, watchdogConfig, new AVRClock(cpu, F_CPU));
@@ -135,6 +140,14 @@ class Sim {
   runUntil(pred, maxMs) {
     for (let t = 0; t < maxMs; t += 5) { if (pred()) return true; this.run(5); }
     return pred();
+  }
+
+  // Type into the Serial monitor; returns what the sketch printed in reply.
+  send(text, waitMs = 1500) {
+    const from = this.serial.length;
+    for (const ch of text) { this.usart.writeByte(ch.charCodeAt(0)); this.run(5); }
+    this.run(waitMs);
+    return this.serial.slice(from);
   }
 
   brake(on) { this.portB.setPin(2, !on); }                        // D10, LOW = pressed
@@ -482,4 +495,35 @@ test('event log: two buttons and falling out of gear are stored with the gear', 
   s.v += 0.4;
   s.run(1000);
   assert.deepEqual(events(s), ['START N', '2 BUTTONS HELD N', 'SENSOR FAULT N', 'OUT OF GEAR N']);
+});
+
+test('calibration: final_safe.ino publishes it to EEPROM and diag.ino reads it from there', () => {
+  const fresh = new Sim(D, { hex: diagProgram });                 // diag before final_safe ever ran
+  assert.match(fresh.send('c'), /No calibration stored/);
+
+  const s = new Sim(D);
+  const cal = new Float32Array(s.eeprom.memory.slice(49, 49 + 32).buffer);
+  assert.deepEqual([...cal].map(x => +x.toFixed(2)), [5, 0.2, 4.8, P, R, N, D, 0.15]);
+
+  const diag = new Sim(D, { hex: diagProgram, eeprom: s.eeprom });
+  const out = diag.send('c');
+  for (const line of ['P = 0.600', 'R = 1.200', 'N = 2.000', 'D = 2.800', 'OK, final_safe.ino will accept these'])
+    assert.ok(out.includes(line), out);
+});
+
+test('diag.ino prints the event log that final_safe.ino wrote', () => {
+  const s = new Sim(D);
+  s.press('N', 150);
+  s.runUntil(() => s.v < 2.5, 2000);
+  s.blocked = true;
+  s.run(2000);
+
+  const diag = new Sim(D, { hex: diagProgram, eeprom: s.eeprom });
+  const out = diag.send('l');
+  assert.ok(out.includes('START  gear D  (POWER ON)'), out);
+  assert.ok(out.includes('MOTOR BLOCKED  gear N  +0 min'), out);
+
+  assert.match(diag.send('x'), /logs cleared/);
+  assert.doesNotMatch(diag.send('l'), /MOTOR BLOCKED/);
+  assert.match(diag.send('c'), /OK, final_safe/);                  // clearing keeps the calibration
 });
