@@ -165,6 +165,7 @@ DebouncedInput inBrake   = {PIN_BRAKE,   INPUT_STABLE_MS, false, false, 0};
 /**************** MESSAGES ****************/
 char msgText[17] = "";
 unsigned long msgAt = 0;
+const char* bootWarn = nullptr;   // WATCHDOG / BROWNOUT start: stays on the LCD until a button is pressed
 void showMsg(const char* t){
   strncpy(msgText, t, 16); msgText[16] = 0;
   msgAt = millis();
@@ -491,6 +492,8 @@ void updateLcd(float v, unsigned long now){
     snprintf(l1, sizeof l1, "%s", msgText);
   else if (state == ST_FAULT)
     snprintf(l1, sizeof l1, "%s", faultText);
+  else if (bootWarn)
+    snprintf(l1, sizeof l1, "Start: %s", bootWarn);
   else {
     dtostrf(v, 4, 2, vs);
     snprintf(l1, sizeof l1, "%sV %s", vs, inBrake.stable ? "BRAKE" : "");
@@ -527,6 +530,7 @@ void setup(){
 
   // 4) Reset diagnostics
   uint8_t rf = resetFlags();
+  if (!(rf & (_BV(PORF) | _BV(EXTRF))) && (rf & (_BV(WDRF) | _BV(BORF)))) bootWarn = resetName(rf);
   logReset(rf);
   Serial.begin(115200);
   Serial.print(F("Reset cause: ")); Serial.println(resetName(rf));
@@ -572,6 +576,7 @@ void loop(){
 
   inBrake.update(now);
   Gear req = readButtons(now);
+  if (req != G_NONE) bootWarn = nullptr;
 
   static unsigned long posOkAt = 0;
   bool posOk = posInRange(v);

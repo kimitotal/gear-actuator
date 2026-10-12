@@ -421,3 +421,22 @@ test('hold suspended: pressing the current gear re-seats an off-centre actuator'
   assert.equal(s.settle(), 'Gear: D');
   assert.ok(near(s.v, D), `v=${s.v}`);
 });
+
+test('LCD: a WATCHDOG / BROWNOUT start stays on screen until a button is pressed', () => {
+  const s = new Sim(D, { mcusr: WDRF });
+  s.settle();
+  s.run(5000);
+  assert.equal(s.lcd.line(0), 'Gear: D');
+  assert.equal(s.lcd.line(1), 'Start: WATCHDOG');
+  s.press('N');
+  assert.equal(s.settle(), 'Gear: N');
+  assert.match(s.lcd.line(1), /^d.ddV$/);
+
+  const b = new Sim(D, { mcusr: 4 });          // BORF
+  b.settle(); b.run(2000);
+  assert.equal(b.lcd.line(1), 'Start: BROWNOUT');
+
+  const ok = new Sim(D);                       // normal power-on: nothing sticks
+  ok.settle(); ok.run(2000);
+  assert.equal(ok.lcd.line(1), '2.80V');
+});
