@@ -244,15 +244,70 @@ struct Move {
   uint8_t wrongN;            // consecutive wrong-direction readings
 } mv;
 
+/**************** EEPROM LAYOUT / EVENT LOG ****************/
+// diag.ino reads all of this with 'l' – keep its copy of these lines in sync.
+const int     EE_MAGIC = 0, EE_IDX = 1, EE_LOG = 2, EE_LOG_N = 8;
+const int     EE_CNT_PWR = 10, EE_CNT_EXT = 11, EE_CNT_BOR = 12, EE_CNT_WDT = 13;
+const int     EE_EV_IDX = 16, EE_EV_LOG = 17, EE_EV_N = 16;   // 2 bytes per event
+const int     EE_END = EE_EV_LOG + 2 * EE_EV_N;
+const uint8_t EE_MAGIC_VAL = 0x5B;   // change to wipe the logs
+
+void eeInit(){
+  if (EEPROM.read(EE_MAGIC) == EE_MAGIC_VAL) return;
+  for (int a = 0; a < EE_END; a++) EEPROM.update(a, 0);
+  EEPROM.update(EE_MAGIC, EE_MAGIC_VAL);
+}
+
+// The last EE_EV_N faults / odd events survive power-off, so what happened
+// while driving can be read afterwards. The codes are stored: only ever ADD
+// new ones at the end.
+enum : uint8_t { EV_NONE, EV_START, EV_SENSOR, EV_CAL, EV_BLOCKED, EV_SLOW,
+                 EV_REVERSED, EV_OUT_OF_GEAR, EV_CANT_HOLD, EV_2BUTTONS };
+
+const char* evName(uint8_t e){
+  switch (e){
+    case EV_START:       return "START";
+    case EV_SENSOR:      return "SENSOR FAULT";
+    case EV_CAL:         return "BAD CALIBRATION";
+    case EV_BLOCKED:     return "MOTOR BLOCKED";
+    case EV_SLOW:        return "SHIFT TOO SLOW";
+    case EV_REVERSED:    return "MOTOR REVERSED?";
+    case EV_OUT_OF_GEAR: return "OUT OF GEAR";
+    case EV_CANT_HOLD:   return "CANT HOLD GEAR";
+    case EV_2BUTTONS:    return "2 BUTTONS HELD";
+    default:             return "";
+  }
+}
+
+// Entry = [gear << 4 | code] [extra]. Gear is the target while shifting.
+// extra = minutes since start (reset flags for EV_START).
+void logEvent(uint8_t code, uint8_t extra){
+  static uint8_t last = 0;
+  uint8_t b = (((state == ST_MOVING) ? mv.target : currentGear) << 4) | code;
+  if (b == last) return;               // a flapping fault must not wear out the EEPROM
+  last = b;
+  uint8_t idx = EEPROM.read(EE_EV_IDX) % EE_EV_N;
+  EEPROM.update(EE_EV_LOG + 2 * idx, b);
+  EEPROM.update(EE_EV_LOG + 2 * idx + 1, extra);
+  EEPROM.update(EE_EV_IDX, (idx + 1) % EE_EV_N);
+}
+
+// A fault / odd event: on the LCD for a moment and into the log for good.
+void event(uint8_t code){
+  showMsg(evName(code));
+  logEvent(code, min(millis() / 60000UL, 255UL));
+}
+
 /**************** FAULTS ****************/
 bool recovering = false;
 unsigned long recoverSince = 0;
 
-void enterFault(const char* t){
+void enterFault(uint8_t code){
   motorBrake();
+  logEvent(code, min(millis() / 60000UL, 255UL));
   // Mid-shift = gear unknown. A hold correction keeps its gear.
   if (state == ST_MOVING && !mv.correction) currentGear = G_NONE;
-  strncpy(faultText, t, 16); faultText[16] = 0;
+  strncpy(faultText, evName(code), 16); faultText[16] = 0;
   recovering = false;
   state = ST_FAULT;
 }
@@ -318,15 +373,15 @@ void startMove(Gear g, bool correction, float v){
   state = ST_MOVING;
 }
 
-void endMove(bool success, const char* why, float v){
+void endMove(bool success, uint8_t why, float v){
   motorBrake();
   if (success){
     currentGear = mv.target;
     if (!mv.correction){ holdSuspended = false; correctionCount = 0; }
   } else {
+    event(why);                               // logged with the gear it was going to
     currentGear = detectGear(v);              // trust the sensor, not memory
     holdSuspended = true;                     // no automatic moves after a failure
-    showMsg(why);
   }
   drifting = false;
   state = ST_IDLE;
@@ -341,16 +396,16 @@ void runMove(float v, unsigned long now){
     motorBrake();
     if (!mv.inZone){ mv.inZone = true; mv.inZoneSince = now; }
     mv.progressAdiff = adiff; mv.progressFwd = fwd; mv.progressT = now;
-    if (now - mv.inZoneSince >= DWELL_MS) endMove(true, "", v);
+    if (now - mv.inZoneSince >= DWELL_MS) endMove(true, EV_NONE, v);
     return;
   }
   mv.inZone = false;
 
-  if (now - mv.startT > MOVE_TIMEOUT_MS)       { endMove(false, "SHIFT TOO SLOW", v);    return; }
+  if (now - mv.startT > MOVE_TIMEOUT_MS)       { endMove(false, EV_SLOW, v);    return; }
   // One wild reading (a sensor wire dropping out passes through every voltage)
   // must not abort the shift: it has to be wrong several readings in a row.
   if (adiff <= mv.startAbsDiff + WRONG_DIR_V) mv.wrongN = 0;
-  else if (++mv.wrongN >= WRONG_DIR_READINGS)  { endMove(false, "MOTOR REVERSED?", v); return; }
+  else if (++mv.wrongN >= WRONG_DIR_READINGS)  { endMove(false, EV_REVERSED, v); return; }
 
   // Progress = getting CLOSER (or reversing after an overshoot). Sensor noise
   // wobbling back and forth must not keep a stalled motor powered. If the
@@ -359,7 +414,7 @@ void runMove(float v, unsigned long now){
       adiff - mv.progressAdiff > WRONG_DIR_V){
     mv.progressAdiff = adiff; mv.progressFwd = fwd; mv.progressT = now;
   }
-  else if (now - mv.progressT > STALL_MS)      { endMove(false, "MOTOR BLOCKED", v);           return; }
+  else if (now - mv.progressT > STALL_MS)      { endMove(false, EV_BLOCKED, v);           return; }
 
   motorDrive(adiff < SLOW_BAND_V ? PWM_SLOW : PWM_FAST, fwd);
 }
@@ -376,8 +431,8 @@ void holdMonitor(float v, unsigned long now){
   if (!ENABLE_POSITION_HOLD || holdSuspended){
     // not allowed to move: at least make the shown gear match reality
     if (err > DETECT_WIN_V){
+      event(EV_OUT_OF_GEAR);                  // logged with the gear it fell out of
       currentGear = detectGear(v);
-      showMsg("OUT OF GEAR");
     }
     return;
   }
@@ -385,7 +440,7 @@ void holdMonitor(float v, unsigned long now){
   if (now - corrWindowStart > CORRECTION_WINDOW_MS){ corrWindowStart = now; correctionCount = 0; }
   if (++correctionCount > MAX_CORRECTIONS){
     holdSuspended = true;
-    showMsg("CANT HOLD GEAR");
+    event(EV_CANT_HOLD);
     if (err > DETECT_WIN_V) currentGear = detectGear(v);
     return;
   }
@@ -420,14 +475,11 @@ Gear readButtons(unsigned long now){
   if (!(eP || eR || eN || eD)) return G_NONE;
   // raw, not debounced: a second button that is only just going down counts too
   uint8_t held = btnP.lastRaw + btnR.lastRaw + btnN.lastRaw + btnD.lastRaw;
-  if (held > 1){ showMsg("2 BUTTONS HELD"); return G_NONE; }
+  if (held > 1){ event(EV_2BUTTONS); return G_NONE; }
   return eP ? G_P : eR ? G_R : eN ? G_N : G_D;
 }
 
 /**************** RESET LOG (EEPROM) ****************/
-const int     EE_MAGIC = 0, EE_IDX = 1, EE_LOG = 2, EE_LOG_N = 8;
-const int     EE_CNT_PWR = 10, EE_CNT_EXT = 11, EE_CNT_BOR = 12, EE_CNT_WDT = 13;
-const uint8_t EE_MAGIC_VAL = 0x5A;   // change to wipe the log
 
 uint8_t resetFlags(){
   uint8_t f = g_mcusr & 0x0F;
@@ -448,10 +500,6 @@ const char* resetName(uint8_t f){
 void bump(int addr){ uint8_t c = EEPROM.read(addr); if (c < 255) EEPROM.write(addr, c + 1); }
 
 void logReset(uint8_t f){
-  if (EEPROM.read(EE_MAGIC) != EE_MAGIC_VAL){
-    for (int a = 0; a < 16; a++) EEPROM.update(a, 0);
-    EEPROM.update(EE_MAGIC, EE_MAGIC_VAL);
-  }
   uint8_t idx = EEPROM.read(EE_IDX) % EE_LOG_N;
   EEPROM.update(EE_LOG + idx, f);
   EEPROM.update(EE_IDX, (idx + 1) % EE_LOG_N);
@@ -521,15 +569,15 @@ void setup(){
   // 3) Adopt the gear the actuator is ALREADY in – never move at boot
   calOk = checkCalibration();
   float v = readPosV();
-  if (!calOk)                enterFault("BAD CALIBRATION");
-  else if (!posInRange(v))   enterFault("SENSOR FAULT");
-  else {
-    currentGear = detectGear(v);
-  }
+  if (calOk && posInRange(v)) currentGear = detectGear(v);
+  uint8_t rf = resetFlags();
+  eeInit();
+  logEvent(EV_START, rf);                    // every start, with the gear it found
+  if (!calOk)                enterFault(EV_CAL);
+  else if (!posInRange(v))   enterFault(EV_SENSOR);
   holdSuspended = (currentGear == G_NONE);   // hold from boot, if the gear is known
 
   // 4) Reset diagnostics
-  uint8_t rf = resetFlags();
   if (!(rf & (_BV(PORF) | _BV(EXTRF))) && (rf & (_BV(WDRF) | _BV(BORF)))) bootWarn = resetName(rf);
   logReset(rf);
   Serial.begin(115200);
@@ -581,7 +629,7 @@ void loop(){
   static unsigned long posOkAt = 0;
   bool posOk = posInRange(v);
   if (posOk) posOkAt = now;
-  else if (state != ST_FAULT && now - posOkAt >= SENSOR_FAULT_MS) enterFault("SENSOR FAULT");
+  else if (state != ST_FAULT && now - posOkAt >= SENSOR_FAULT_MS) enterFault(EV_SENSOR);
 
   if (!posOk && state != ST_FAULT) motorBrake();   // unconfirmed glitch: don't act on a bad reading
   else switch (state){

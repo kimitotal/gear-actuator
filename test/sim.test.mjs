@@ -67,7 +67,7 @@ class Lcd {
 
 class Sim {
   // startV: where the actuator sits at power-up. mcusr: reset flags the chip reports.
-  constructor(startV, { mcusr = PORF, lcdPresent = true } = {}) {
+  constructor(startV, { mcusr = PORF, lcdPresent = true, eeprom = new EEPROMMemoryBackend(1024) } = {}) {
     this.v = startV;
     this.sensor = v => v;        // override to fake a broken / glitching sensor wire
     this.blocked = false;        // actuator mechanically jammed
@@ -85,7 +85,8 @@ class Sim {
     new AVRTimer(cpu, timer0Config); new AVRTimer(cpu, timer1Config); new AVRTimer(cpu, timer2Config);
     this.adc = new AVRADC(cpu, adcConfig);
     new AVRUSART(cpu, usart0Config, F_CPU).onByteTransmit = b => { this.serial += String.fromCharCode(b); };
-    new AVREEPROM(cpu, new EEPROMMemoryBackend(1024));
+    this.eeprom = eeprom;        // pass it to the next Sim to keep the EEPROM across a "power cycle"
+    new AVREEPROM(cpu, eeprom);
     new AVRWatchdog(cpu, watchdogConfig, new AVRClock(cpu, F_CPU));
     const twi = new AVRTWI(cpu, twiConfig, F_CPU);
     twi.eventHandler = {
@@ -439,4 +440,46 @@ test('LCD: a WATCHDOG / BROWNOUT start stays on screen until a button is pressed
   const ok = new Sim(D);                       // normal power-on: nothing sticks
   ok.settle(); ok.run(2000);
   assert.equal(ok.lcd.line(1), '2.80V');
+});
+
+// Decode the EEPROM event log the way diag.ino prints it: "NAME gear".
+const EV = ['', 'START', 'SENSOR FAULT', 'BAD CALIBRATION', 'MOTOR BLOCKED', 'SHIFT TOO SLOW',
+  'MOTOR REVERSED?', 'OUT OF GEAR', 'CANT HOLD GEAR', '2 BUTTONS HELD'];
+function events(s) {
+  const m = s.eeprom.memory, idx = m[16] % 16, out = [];
+  for (let k = 0; k < 16; k++) {
+    const a = 17 + 2 * ((idx + k) % 16), code = m[a] & 15;
+    if (code) out.push(`${EV[code]} ${'?PRND'[m[a] >> 4]}`);
+  }
+  return out;
+}
+
+test('event log: a blocked shift is stored and survives a power cycle', () => {
+  const s = new Sim(D);
+  s.press('N', 150);
+  s.runUntil(() => s.v < 2.5, 2000);
+  s.blocked = true;
+  s.run(2000);
+  assert.deepEqual(events(s), ['START D', 'MOTOR BLOCKED N']);
+
+  const next = new Sim(D, { eeprom: s.eeprom });
+  assert.deepEqual(events(next), ['START D', 'MOTOR BLOCKED N', 'START D']);
+});
+
+test('event log: a flapping sensor fault is stored once, not on every flap', () => {
+  const s = new Sim(D);
+  for (let i = 0; i < 3; i++) {
+    s.sensor = () => 0; s.run(300);
+    s.sensor = v => v; s.run(1500);
+  }
+  assert.deepEqual(events(s), ['START D', 'SENSOR FAULT D']);
+});
+
+test('event log: two buttons and falling out of gear are stored with the gear', () => {
+  const s = new Sim(N);
+  s.hold('P', 'D'); s.run(300); s.release('P', 'D');
+  s.sensor = () => 0; s.run(300); s.sensor = v => v; s.run(1500);   // hold now suspended
+  s.v += 0.4;
+  s.run(1000);
+  assert.deepEqual(events(s), ['START N', '2 BUTTONS HELD N', 'SENSOR FAULT N', 'OUT OF GEAR N']);
 });

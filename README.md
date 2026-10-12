@@ -30,6 +30,8 @@ boot, or noise on the button wires being read as presses.
 - Motor rests in brake
 - Limp mode: in a fault, hold P or D + brake to creep the actuator blind toward that end (max 3 s per press)
 - Pressing the current gear again re-seats it if it sits off-centre
+- Event log in EEPROM: the last 16 faults / odd events (with gear and minutes since start) survive power-off; read them with `diag.ino`, command `l`
+- A WATCHDOG or BROWNOUT start stays on the LCD until the first button press
 
 ## New wiring for final_safe.ino
 
@@ -65,7 +67,7 @@ Not yet tested on hardware.
 ## Logic test (no hardware)
 
 `test/sim.test.mjs` runs the compiled `final_safe.ino` in an ATmega328P simulator
-(avr8js) against a simple actuator model and checks 24 scenarios: interlocks, button
+(avr8js) against a simple actuator model and checks 28 scenarios: interlocks, button
 noise, sensor glitch / fault / recovery, stall, wrong direction, hold, limp mode, reset
 cause. Needs Node.js and `arduino-cli`.
 

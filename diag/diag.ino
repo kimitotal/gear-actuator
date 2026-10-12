@@ -16,8 +16,8 @@
  * Serial monitor 115200 baud, send one letter:
  *   h help        s status stream on/off   p print status once
  *   f jog forward  b jog backward
- *   c check calibration                    l reset log (from final_safe)
- *   x clear reset log                      z zero noise/Vcc counters
+ *   c check calibration                    l reset + event log (from final_safe)
+ *   x clear both logs                      z zero noise/Vcc counters
  *   w watchdog test (board must reboot once and show Rst:WATCHDOG)
  ************************************************************/
 
@@ -158,7 +158,14 @@ float readVcc(){
 /**************** RESET LOG (same EEPROM layout as final_safe.ino) ****************/
 const int     EE_MAGIC = 0, EE_IDX = 1, EE_LOG = 2, EE_LOG_N = 8;
 const int     EE_CNT_PWR = 10, EE_CNT_EXT = 11, EE_CNT_BOR = 12, EE_CNT_WDT = 13;
-const uint8_t EE_MAGIC_VAL = 0x5A;
+const int     EE_EV_IDX = 16, EE_EV_LOG = 17, EE_EV_N = 16;   // 2 bytes per event
+const int     EE_END = EE_EV_LOG + 2 * EE_EV_N;
+const uint8_t EE_MAGIC_VAL = 0x5B;
+
+// Event codes written by final_safe.ino – same order as its EV_ list.
+const char* const evNames[] = {"", "START", "SENSOR FAULT", "BAD CALIBRATION", "MOTOR BLOCKED",
+  "SHIFT TOO SLOW", "MOTOR REVERSED?", "OUT OF GEAR", "CANT HOLD GEAR", "2 BUTTONS HELD"};
+const uint8_t EV_START = 1, EV_COUNT = sizeof evNames / sizeof evNames[0];
 
 uint8_t bootFlags = 0;
 
@@ -168,9 +175,9 @@ uint8_t resetFlags(){
   return f;
 }
 const char* resetName(uint8_t f){
-  if (f & _BV(WDRF))  return "WATCHDOG";
+  if (f & _BV(PORF))  return "POWER ON";     // same priority as final_safe.ino
   if (f & _BV(EXTRF)) return "RESET BTN";
-  if (f & _BV(PORF))  return "POWER ON";
+  if (f & _BV(WDRF))  return "WATCHDOG";
   if (f & _BV(BORF))  return "BROWNOUT";
   return "UNKNOWN";
 }
@@ -233,8 +240,8 @@ void printHelp(){
   Serial.println(F("\n=== GEAR ACTUATOR DIAGNOSTICS ==="));
   Serial.println(F(" s status stream on/off   p status once"));
   Serial.println(F(" f / b  jog motor forward / backward (short, slow)"));
-  Serial.println(F(" c calibration check      l reset log"));
-  Serial.println(F(" x clear reset log        z zero counters"));
+  Serial.println(F(" c calibration check      l reset + event log"));
+  Serial.println(F(" x clear both logs        z zero counters"));
   Serial.println(F(" w watchdog test (must reboot ONCE)"));
   Serial.println(F(" Noise test: send z, then do NOT touch buttons, start engine,"));
   Serial.println(F(" run fan/lights/wipers; spikes should stay 0.\n"));
@@ -283,11 +290,26 @@ void printResetLog(){
   Serial.println();
   if (EEPROM.read(EE_CNT_BOR) || EEPROM.read(EE_CNT_WDT))
     Serial.println(F("!! Brownout/watchdog resets happened -> check power supply, wiring, heat."));
+
+  // Faults and odd events from final_safe.ino. "gear" is the gear it was in,
+  // or the gear it was shifting to; time is minutes after that START.
+  Serial.println(F("Events, oldest -> newest:"));
+  uint8_t ei = EEPROM.read(EE_EV_IDX) % EE_EV_N;
+  for (uint8_t k = 0; k < EE_EV_N; k++){
+    int a = EE_EV_LOG + 2 * ((ei + k) % EE_EV_N);
+    uint8_t b = EEPROM.read(a), extra = EEPROM.read(a + 1), code = b & 0x0F;
+    if (!code) continue;
+    Serial.print(F("  "));
+    Serial.print(code < EV_COUNT ? evNames[code] : "?");
+    Serial.print(F("  gear ")); Serial.print(gearCh((Gear)(b >> 4)));
+    if (code == EV_START){ Serial.print(F("  (")); Serial.print(resetName(extra)); Serial.println(')'); }
+    else { Serial.print(F("  +")); Serial.print(extra); Serial.println(extra == 255 ? F(" min or more") : F(" min")); }
+  }
 }
 
 void clearResetLog(){
-  for (int a = 0; a < 16; a++) EEPROM.update(a, 0);
-  Serial.println(F("Reset log cleared."));
+  for (int a = 0; a < EE_END; a++) EEPROM.update(a, 0);
+  Serial.println(F("Reset and event logs cleared."));
 }
 
 void checkCalibration(){
